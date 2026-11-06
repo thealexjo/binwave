@@ -1,0 +1,26 @@
+# Build output
+/bin/
+/dist/
+
+# Test artifacts
+*.test
+coverage.out
+*.prof
+
+# Output captured from a real source: it holds real database and table names, so it must never be
+# committed.
+*.log
+
+# Local Go workspace
+go.work
+go.work.sum
+
+# Local environment
+.env
+.env.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
