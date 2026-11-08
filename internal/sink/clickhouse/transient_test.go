@@ -27,6 +27,7 @@ func TestIsTransient(t *testing.T) {
 		{"read only replica", &ch.Exception{Code: 164}, true},
 		{"unknown status of insert", &ch.Exception{Code: 319}, true},
 		{"network error code", &ch.Exception{Code: 210}, true},
+		{"query cancelled by a server shutting down", &ch.Exception{Code: 394}, true},
 		{"wrapped exception", fmt.Errorf("insert 5 rows: %w", &ch.Exception{Code: 252}), true},
 		{"connection reset", &net.OpError{Op: "read", Err: syscall.ECONNRESET}, true},
 		{"broken pipe", &net.OpError{Op: "write", Err: syscall.EPIPE}, true},

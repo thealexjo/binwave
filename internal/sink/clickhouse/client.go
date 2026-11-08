@@ -344,6 +344,7 @@ var transientCodes = map[int32]bool{
 	241: true, // MEMORY_LIMIT_EXCEEDED
 	252: true, // TOO_MANY_PARTS: the server asks inserts to slow down
 	319: true, // UNKNOWN_STATUS_OF_INSERT: the insert may have happened; repeating is safe
+	394: true, // QUERY_WAS_CANCELLED: a server shutting down cancels the queries in flight
 	425: true, // SYSTEM_ERROR
 	999: true, // KEEPER_EXCEPTION
 }
