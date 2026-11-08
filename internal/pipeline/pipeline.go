@@ -94,6 +94,8 @@ type Store interface {
 // is anything else: a mistake of the configuration, or a failure to look at the table at all.
 type Guard interface {
 	CheckTable(ctx context.Context, database, table string) (problem error, err error)
+	// Forget makes the next CheckTable of the table look at it again.
+	Forget(database, table string)
 }
 
 // RetryPolicy controls how transient ClickHouse failures are retried.
@@ -141,6 +143,7 @@ type Pipeline struct {
 	versions *chsink.Versioner
 
 	registry map[string]*binding
+	recheck  map[string]bool // tables a statement named since they were vetted: vetted again before their next row
 	// targets maps each ClickHouse table in use to the source table that feeds it, to refuse two
 	// sources writing into one target.
 	targets map[string]string
@@ -242,6 +245,7 @@ func New(cfg *config.Config, d Deps) (*Pipeline, error) {
 		router:   NewRouter(cfg.Tables),
 		retry:    d.Retry,
 		registry: make(map[string]*binding),
+		recheck:  make(map[string]bool),
 		targets:  make(map[string]string),
 		buffers:  make(map[*chsink.Table]*tableBuffer),
 		resyncs:  make(map[string]*resyncJob),
@@ -585,6 +589,7 @@ func (p *Pipeline) ddl(ctx context.Context, e event.DDL) error {
 	if impacts := p.resyncImpacts(e); len(impacts) > 0 {
 		p.interruptResyncs(ctx, e, impacts)
 	}
+	p.forgetChecks(e)
 
 	d, ok := classify(e.Query, e.Database)
 	if !ok {
@@ -608,6 +613,10 @@ func cutQualified(name string) (db, table string, ok bool) {
 // pointer is compared by signature, and only a real change re-resolves and re-checks the table.
 func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error) {
 	name := src.FullName()
+	if p.recheck[name] {
+		delete(p.recheck, name)
+		p.forgetTable(name) // bound again, so the guard looks at it again
+	}
 
 	if cur, ok := p.registry[name]; ok {
 		if cur.src == src {

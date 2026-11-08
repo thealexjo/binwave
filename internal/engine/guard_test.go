@@ -118,6 +118,22 @@ func TestGuardSkipsTablesThePreflightHasVetted(t *testing.T) {
 	}
 }
 
+// TestGuardChecksAForgottenTableAgain: the table was created again, now with a cascading foreign key.
+func TestGuardChecksAForgottenTableAgain(t *testing.T) {
+	clean := &schema.Catalog{Tables: cascadingCatalog().Tables}
+	reader := &fakeCatalog{cat: clean}
+	g := newTableGuard(reader, guardConfig(config.CascadesError), slog.New(slog.DiscardHandler))
+	if problem, err := g.CheckTable(context.Background(), "shop", "orders"); err != nil || problem != nil {
+		t.Fatalf("CheckTable() = (%v, %v) of a clean table", problem, err)
+	}
+
+	reader.cat = cascadingCatalog()
+	g.Forget("shop", "orders")
+	if problem, err := g.CheckTable(context.Background(), "shop", "orders"); err != nil || problem == nil {
+		t.Errorf("CheckTable() = (%v, %v) after Forget, want the cascade found", problem, err)
+	}
+}
+
 func TestGuardDoesNotStopForATableTheCatalogDoesNotShow(t *testing.T) {
 	g := newTableGuard(&fakeCatalog{cat: &schema.Catalog{}}, guardConfig(config.CascadesError), slog.New(slog.DiscardHandler))
 	if problem, err := g.CheckTable(context.Background(), "shop", "gone"); err != nil || problem != nil {

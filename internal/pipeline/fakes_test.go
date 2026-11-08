@@ -640,6 +640,13 @@ type fakeGuard struct {
 	// does for tables.on_replication_error: stop (config.OnErrorStop) — a problem the caller must
 	// not quarantine away, because it means the whole service stops.
 	stopReject map[string]error
+	forgotten  []string
+}
+
+func (g *fakeGuard) Forget(database, table string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.forgotten = append(g.forgotten, database+"."+table)
 }
 
 func (g *fakeGuard) CheckTable(_ context.Context, database, table string) (problem, err error) {

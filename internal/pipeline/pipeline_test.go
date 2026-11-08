@@ -901,6 +901,41 @@ func TestGuardVetsATableOnceBeforeItsFirstWrite(t *testing.T) {
 	}
 }
 
+// TestGuardVetsATableAgainAfterAStatementNamesIt: a statement can give the table what the guard
+// rejects (a cascading foreign key), with the structure the binlog shows unchanged.
+func TestGuardVetsATableAgainAfterAStatementNamesIt(t *testing.T) {
+	for _, stmts := range [][]string{
+		{"DROP TABLE items", "CREATE TABLE items (id INT PRIMARY KEY, name VARCHAR(20) NULL)"},
+		{"ALTER TABLE items ADD CONSTRAINT fk FOREIGN KEY (id) REFERENCES other (id) ON DELETE CASCADE"},
+		{"RENAME TABLE items TO old_items, new_items TO items"},
+	} {
+		t.Run(stmts[0], func(t *testing.T) {
+			h := newHarness(t)
+			g := &fakeGuard{}
+			h.guard = g
+			items := itemsTable()
+			script := []scriptedTx{tx(1, insertRows(items, 1, "a"))}
+			for _, q := range stmts {
+				script = append(script, tx(len(script)+1, ddlEvent(q)))
+			}
+			script = append(script, tx(len(script)+1, insertRows(items, 2, "b")))
+			h.source.script = script
+
+			if err := h.run(t); err != nil {
+				t.Fatal(err)
+			}
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if n := len(g.forgotten); n == 0 || g.forgotten[n-1] != "shop.items" {
+				t.Errorf("forgotten = %v, want shop.items", g.forgotten)
+			}
+			if len(g.asked) != 2 || g.asked[1] != "shop.items" {
+				t.Errorf("guard was asked %v, want shop.items again after the statement", g.asked)
+			}
+		})
+	}
+}
+
 func TestGuardRejectionStopsBeforeAnythingIsWrittenForTheTable(t *testing.T) {
 	h := newHarness(t)
 	h.cfg.Tables.OnReplicationError = config.OnErrorStop

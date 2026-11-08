@@ -286,6 +286,48 @@ func (p *Pipeline) renameTables(ctx context.Context, pairs []ddl.Rename) error {
 	return nil
 }
 
+// forgetChecks makes the guard look again at the replicated tables a statement names: it may have
+// given them what the guard rejects (a cascading foreign key) with the columns unchanged.
+func (p *Pipeline) forgetChecks(e event.DDL) {
+	if p.d.Guard == nil {
+		return
+	}
+	op, err := ddl.Parse(e.Query, e.Database)
+	if err != nil {
+		return
+	}
+	var named []ddl.Name
+	dropped := false
+	switch o := op.(type) {
+	case ddl.CreateTable:
+		named = []ddl.Name{o.Table}
+	case ddl.DropTable:
+		named, dropped = o.Tables, true
+	case ddl.RenameTable:
+		for _, pair := range o.Pairs {
+			named = append(named, pair.From, pair.To)
+		}
+	case ddl.AlterTable:
+		named = []ddl.Name{o.Table}
+		for _, spec := range o.Specs {
+			if r, ok := spec.(ddl.RenameTo); ok {
+				named = append(named, r.Table)
+			}
+		}
+	}
+	for _, n := range named {
+		if !p.router.Match(n.Database, n.Table) {
+			continue
+		}
+		p.d.Guard.Forget(n.Database, n.Table)
+		if dropped {
+			delete(p.recheck, n.String())
+		} else {
+			p.recheck[n.String()] = true
+		}
+	}
+}
+
 // forgetTable drops what the pipeline holds about the tables of a rename: the next rows of
 // either name bind the table again, against the structure the binlog then shows. Buffers are
 // empty at a DDL event, so nothing is lost.

@@ -40,6 +40,13 @@ func (g *tableGuard) markChecked(cat *schema.Catalog) {
 	}
 }
 
+// Forget implements pipeline.Guard.
+func (g *tableGuard) Forget(database, table string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.checked, database+"."+table)
+}
+
 // CheckTable implements pipeline.Guard. A mistake of the configuration is an error, which stops
 // the service. A problem of the table itself is returned as problem, for the pipeline to set the
 // table aside; with tables.on_replication_error: stop it is an error too.

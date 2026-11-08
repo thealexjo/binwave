@@ -487,3 +487,41 @@ func purgeBinaryLogs(t *testing.T, root *sql.DB) {
 		t.Fatal(err)
 	}
 }
+
+// TestTableCreatedAgainWithACascadeIsVettedAgain: the first check of the table, when it was clean,
+// does not stand for the table created later under the same name.
+func TestTableCreatedAgainWithACascadeIsVettedAgain(t *testing.T) {
+	t.Parallel()
+	my := testenv.StartMySQL(t)
+	ch := testenv.StartClickHouse(t)
+	mustExec(t, my, "CREATE TABLE binwave.parent (id INT PRIMARY KEY)", "CREATE TABLE binwave.late (id INT PRIMARY KEY, parent_id INT)")
+	cfg := engineConfig(t, my, ch, "file")
+	cfg.Tables.OnReplicationError = config.OnErrorStop
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.New(cfg, quietLogger()).Run(ctx, app.Hooks{Ready: func() { ready <- struct{}{} }, Progress: func() {}})
+	}()
+	select {
+	case <-ready:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the engine did not become ready")
+	}
+	mustExec(t, my,
+		"INSERT INTO binwave.late VALUES (1, NULL)",
+		"DROP TABLE binwave.late",
+		"CREATE TABLE binwave.late (id INT PRIMARY KEY, parent_id INT, CONSTRAINT fk_late FOREIGN KEY (parent_id) REFERENCES binwave.parent (id) ON DELETE CASCADE)",
+		"INSERT INTO binwave.parent VALUES (1)",
+		"INSERT INTO binwave.late VALUES (1, 1)",
+	)
+
+	select {
+	case err := <-done:
+		requireConfigError(t, err, "binwave.late", "fk_late")
+	case <-time.After(60 * time.Second):
+		t.Fatal("the engine kept running with a cascading foreign key in a table created again")
+	}
+}
