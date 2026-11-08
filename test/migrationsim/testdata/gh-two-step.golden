@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS `_orders_gho`
+DROP TABLE IF EXISTS `_orders_del`
+DROP TABLE IF EXISTS `_orders_ghc`
+create /* gh-ost */ table `_orders_ghc` ( id bigint unsigned auto_increment, last_update timestamp not null DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, hint varchar(64) charset ascii not null, value varchar(4096) charset ascii not null, primary key(id), unique key hint_uidx(hint) ) auto_increment=256 comment='gh-ost changelog'
+create /* gh-ost */ table `_orders_gho` like `orders`
+alter /* gh-ost */ table `_orders_gho` CHANGE COLUMN v title VARCHAR(30) NOT NULL, DROP COLUMN qty
+alter /* gh-ost */ table `orders` rename `_orders_del`
+alter /* gh-ost */ table `_orders_gho` rename `orders`
+DROP TABLE IF EXISTS `_orders_ghc`
+DROP TABLE IF EXISTS `_orders_del`
+DROP TABLE IF EXISTS `_orders_ghk`

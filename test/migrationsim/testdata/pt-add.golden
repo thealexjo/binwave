@@ -1,0 +1,11 @@
+CREATE TABLE `_orders_new` ( `id` int NOT NULL, `v` varchar(20) NOT NULL, `qty` int NOT NULL, PRIMARY KEY (`id`) ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+ALTER TABLE `_orders_new` ADD COLUMN c INT NOT NULL DEFAULT 5
+CREATE DEFINER=`root`@`%` TRIGGER `pt_osc_binwave_orders_del` AFTER DELETE ON `orders` FOR EACH ROW BEGIN DECLARE CONTINUE HANDLER FOR 1146 begin end; DELETE IGNORE FROM `_orders_new` WHERE `_orders_new`.`id` <=> OLD.`id`; END
+CREATE DEFINER=`root`@`%` TRIGGER `pt_osc_binwave_orders_upd` AFTER UPDATE ON `orders` FOR EACH ROW BEGIN DECLARE CONTINUE HANDLER FOR 1146 begin end; DELETE IGNORE FROM `_orders_new` WHERE !(OLD.`id` <=> NEW.`id`) AND `_orders_new`.`id` <=> OLD.`id`; REPLACE INTO `_orders_new` (`id`, `v`, `qty`) VALUES (NEW.`id`, NEW.`v`, NEW.`qty`); END
+CREATE DEFINER=`root`@`%` TRIGGER `pt_osc_binwave_orders_ins` AFTER INSERT ON `orders` FOR EACH ROW BEGIN DECLARE CONTINUE HANDLER FOR 1146 begin end; REPLACE INTO `_orders_new` (`id`, `v`, `qty`) VALUES (NEW.`id`, NEW.`v`, NEW.`qty`);END
+ANALYZE TABLE `_orders_new` /* pt-online-schema-change */
+RENAME TABLE `orders` TO `_orders_old`, `_orders_new` TO `orders`
+DROP TABLE IF EXISTS `_orders_old`
+DROP TRIGGER IF EXISTS `pt_osc_binwave_orders_del`
+DROP TRIGGER IF EXISTS `pt_osc_binwave_orders_upd`
+DROP TRIGGER IF EXISTS `pt_osc_binwave_orders_ins`
