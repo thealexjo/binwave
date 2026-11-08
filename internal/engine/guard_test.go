@@ -290,3 +290,40 @@ func TestGuardConfirmsAProblemBeforeReportingIt(t *testing.T) {
 		t.Fatalf("CheckTable() = (%v, %v), want the problem of a table that is still keyless", problem, err)
 	}
 }
+
+// changingCatalog shows, in the read of every table, a shadow table of an online migration without
+// its key, as a read that runs into the statements of the migration does; read alone, it has one.
+type changingCatalog struct{ alone []int }
+
+func (c *changingCatalog) Catalog(_ context.Context, _, table string) (*schema.Catalog, error) {
+	shadow := schema.CatalogTable{Database: "shop", Name: "_items_gho", Columns: []string{"id"}}
+	if table == "" {
+		return &schema.Catalog{Tables: []schema.CatalogTable{shadow}}, nil
+	}
+	c.alone = append(c.alone, len(c.alone))
+	shadow.PrimaryKey = []string{"id"}
+	return &schema.Catalog{Tables: []schema.CatalogTable{shadow}}, nil
+}
+
+func TestPreflightDoesNotSetATableAsideForWhatAConcurrentStatementChanged(t *testing.T) {
+	for _, policy := range []config.ReplicationErrorPolicy{config.OnErrorQuarantine, config.OnErrorStop} {
+		t.Run(string(policy), func(t *testing.T) {
+			cfg := guardConfig(config.CascadesError)
+			cfg.Tables.OnReplicationError = policy
+			e := &Engine{cfg: cfg, log: slog.New(slog.DiscardHandler)}
+			reader := &changingCatalog{}
+			q := &fakeQuarantiner{}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+
+			e.preflight(ctx, reader, newTableGuard(reader, cfg, e.log), q, cancel)
+
+			if ctx.Err() != nil || len(q.tables) != 0 {
+				t.Errorf("quarantined %v, cause %v: the problem is not there when the table is read again", q.tables, context.Cause(ctx))
+			}
+			if len(reader.alone) == 0 {
+				t.Error("the problem was not confirmed by a read of the table alone")
+			}
+		})
+	}
+}

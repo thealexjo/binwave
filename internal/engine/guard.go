@@ -2,7 +2,10 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/thealexjo/binwave/internal/config"
@@ -99,6 +102,39 @@ func (g *tableGuard) CheckTable(ctx context.Context, database, table string) (pr
 		return e, nil
 	}
 	return nil, nil
+}
+
+// confirm reads every table the report finds a problem of again, alone, and keeps the problems the
+// second read shows too: a read of the whole catalog runs into the statements that change a table
+// meanwhile (an online migration). A table whose problem is gone is forgotten, so it is checked
+// again before its first row.
+func (g *tableGuard) confirm(ctx context.Context, r *preflight.Report) error {
+	var tables []string
+	for _, p := range r.TableProblems() {
+		if !slices.Contains(tables, p.Table) {
+			tables = append(tables, p.Table)
+		}
+	}
+	for _, full := range tables {
+		database, table, _ := strings.Cut(full, ".")
+		alone, _, err := g.evaluate(ctx, database, table)
+		var problems []preflight.Problem
+		switch {
+		case ctx.Err() != nil:
+			return fmt.Errorf("confirm the problems of %s: %w", full, ctx.Err())
+		case err != nil:
+			g.log.Warn("preflight: table not read again, checked before its first row", "table", full, "error", err)
+		case alone == nil || len(alone.TableProblems()) == 0:
+			g.log.Warn("preflight: table changed during check", "table", full)
+		default:
+			problems = alone.Problems
+		}
+		if problems == nil {
+			g.Forget(database, table)
+		}
+		r.ReplaceTable(full, problems)
+	}
+	return nil
 }
 
 // evaluate reads the table from the source catalog and checks it. The report is nil when the

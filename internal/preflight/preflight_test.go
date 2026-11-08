@@ -269,3 +269,16 @@ func TestProblemsAreSplitBetweenTheConfigurationAndTheTable(t *testing.T) {
 		t.Errorf("a target collision is a clash of settings: config %v, table %v", r.ConfigProblems(), r.TableProblems())
 	}
 }
+
+func TestReplaceTableKeepsTheProblemsOfOtherTablesAndOfTheConfiguration(t *testing.T) {
+	r := &Report{Problems: []Problem{
+		{Severity: SevError, Scope: ScopeTable, Table: "shop.items", Message: "no key"},
+		{Severity: SevWarning, Table: "shop.items", Message: "an override names no column"},
+		{Severity: SevError, Scope: ScopeTable, Table: "shop.orders", Message: "no key"},
+	}}
+	r.ReplaceTable("shop.items", []Problem{{Severity: SevError, Scope: ScopeTable, Table: "shop.items", Message: "a cascade"}})
+	wantProblems(t, r.Problems, "error: shop.items: a cascade", "warning: shop.items: an override names no column", "error: shop.orders: no key")
+
+	r.ReplaceTable("shop.items", nil)
+	wantProblems(t, r.Problems, "warning: shop.items: an override names no column", "error: shop.orders: no key")
+}

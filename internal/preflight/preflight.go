@@ -320,6 +320,24 @@ func foreignKeysByTable(all []schema.ForeignKey) map[string][]schema.ForeignKey 
 	return out
 }
 
+// ReplaceTable replaces the problems of one table, those of ScopeTable, with the ones of problems
+// of that scope: what a check of the table alone found.
+func (r *Report) ReplaceTable(table string, problems []Problem) {
+	kept := r.Problems[:0]
+	for _, p := range r.Problems {
+		if p.Table != table || p.Scope != ScopeTable {
+			kept = append(kept, p)
+		}
+	}
+	for _, p := range problems {
+		if p.Scope == ScopeTable {
+			kept = append(kept, p)
+		}
+	}
+	r.Problems = kept
+	sortProblems(r.Problems)
+}
+
 func sortProblems(ps []Problem) {
 	sort.SliceStable(ps, func(i, j int) bool {
 		if ps[i].Table != ps[j].Table {

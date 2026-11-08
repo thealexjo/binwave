@@ -278,6 +278,9 @@ func (e *Engine) preflight(ctx context.Context, src catalogReader, guard *tableG
 	}
 	report := preflight.Check(cat, e.cfg)
 	guard.markChecked(cat)
+	if err := guard.confirm(ctx, report); err != nil {
+		return
+	}
 	report.Log(e.log)
 
 	if err := report.ConfigErr(); err != nil {
