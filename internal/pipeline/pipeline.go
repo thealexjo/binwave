@@ -478,6 +478,7 @@ func (p *Pipeline) begin(e event.Begin) error {
 		// from the start. Rows of the first attempt may already be written, but they carry a lower
 		// version than the replay will, so the replay supersedes them.
 		p.log.Info("transaction redelivered, restarting it", "gtid", e.GTID)
+		p.dropTransactionRows(p.tx.version) // the rows still buffered: the replay produces them again
 	}
 	// Every transaction takes a version, including those without replicated rows, so the
 	// version chain does not depend on which tables are configured.

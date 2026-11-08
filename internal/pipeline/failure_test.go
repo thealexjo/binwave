@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/event"
@@ -206,5 +207,38 @@ func TestRowsOfAFailedTransactionAreNotWritten(t *testing.T) {
 	}
 	if got := h.sink.visibleItems(); len(got) != 1 {
 		t.Errorf("rows %v: only transaction 1 was committed", got)
+	}
+}
+
+// TestSkipOfARedeliveredTransactionDropsTheRowsOfEveryAttempt: the rows of the attempt before a
+// reconnect are still buffered when the replay fails; skipping the transaction must leave none of it.
+func TestSkipOfARedeliveredTransactionDropsTheRowsOfEveryAttempt(t *testing.T) {
+	h := newHarness(t)
+	h.cfg.Tables.OnReplicationError = config.OnErrorStop
+	items := itemsTable()
+	bad := event.Rows{Table: items, Op: event.Insert, Rows: []event.Row{{After: []any{int32(2), 987654}}}}
+	h.source.script = []scriptedTx{
+		{n: 1, events: []event.Event{
+			event.Begin{GTID: "u:1", CommitTime: epoch.Add(time.Second)},
+			insertRows(items, 1, "first attempt"),
+			event.Begin{GTID: "u:1", CommitTime: epoch.Add(time.Second)},
+			insertRows(items, 1, "replay"),
+			bad,
+			event.Commit{GTIDSet: "u:1-1"},
+		}},
+		tx(2, insertRows(items, 3, "c")),
+	}
+	p := h.pipeline(t)
+	if f := failureOf(t, h.runPipeline(t, p)); f.GTID != "u:1" {
+		t.Fatalf("failure = %+v", f)
+	}
+
+	p.SetSkip(Skip{Count: 1})
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("after the skip: %v", err)
+	}
+
+	if got := h.sink.visibleItems(); len(got) != 1 || got["3|"] == nil {
+		t.Errorf("rows %v, want only transaction 2: the skipped one is half applied", got)
 	}
 }
