@@ -79,6 +79,7 @@ type resyncJob struct {
 	// boundary: parsing it there, for thousands of tables, is what the garbage collector then lives on.
 	final      *gtid.Set
 	finalCount int64
+	lostFinal  error // state.Final does not parse: the resync is given up when the queue reaches it
 }
 
 type chunkResult struct {
@@ -310,11 +311,7 @@ func (p *Pipeline) awaitSwap(job *resyncJob) {
 	if job.final == nil && job.state.Final != "" {
 		set, err := gtid.Parse(job.state.Final)
 		if err != nil {
-			// A damaged Final cannot say when the swap may happen. The entry keeps its place in the
-			// queue with no parsed set, which swapReady treats as "not yet", and the table stays in the
-			// shadow table until an operator resynchronizes it again.
-			p.log.Error("watermark lost, table not swapped in",
-				"table", job.state.Table, "error", err)
+			job.lostFinal = err // a damaged Final cannot say when the shadow table is complete
 		} else {
 			job.final, job.finalCount = set, set.Count()
 		}
@@ -948,6 +945,11 @@ func (p *Pipeline) swapReady(ctx context.Context) (bool, error) {
 		job := p.awaiting[0]
 		if _, still := p.resyncs[job.state.Table]; !still {
 			p.awaiting = p.awaiting[1:] // given up while this pass ran
+			continue
+		}
+		if job.lostFinal != nil {
+			p.abortResync(ctx, job.state.Table, fmt.Sprintf("its watermark cannot be read: %v", job.lostFinal), true)
+			did = true
 			continue
 		}
 		if !committed.Covers(job.final) {

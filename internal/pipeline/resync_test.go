@@ -358,6 +358,36 @@ func TestResyncFinishesOnlyWhenTheStreamReachedThePointItWasReadAt(t *testing.T)
 	}
 }
 
+// TestADamagedWatermarkGivesTheResyncUp: a saved Final that does not parse cannot say when the
+// shadow table is complete, so it is never swapped in; the resync is given up as on a failed read.
+func TestADamagedWatermarkGivesTheResyncUp(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{executed: fence(2)}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Rows: 1,
+		Done: true, Final: "not a GTID set",
+	}})
+	h.store.pos, h.store.found = checkpoint.Position{GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
+	h.sink.tables["shop.items__resync"] = map[string]cell{"1|": {version: 1, values: []any{int64(1), "a"}}}
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if n := h.sink.swapped(); n != 0 {
+		t.Errorf("the shadow table was swapped in %d times, want never: %v", n, h.journal.all())
+	}
+	if got := quarantinedNames(h.store.current()); len(got) != 1 || got[0] != "shop.items" {
+		t.Errorf("quarantined = %v, want shop.items: its changes since the resync began are lost", got)
+	}
+	if len(h.sink.drops) != 1 || h.sink.drops[0].Table != "items__resync" {
+		t.Errorf("drops = %v, want the shadow table dropped", h.sink.drops)
+	}
+}
+
 // TestDDLDuringAResyncDiscardsItAndBeginsAgain: what was read is in the old structure.
 func TestDDLDuringAResyncDiscardsItAndBeginsAgain(t *testing.T) {
 	items := itemsTable()
