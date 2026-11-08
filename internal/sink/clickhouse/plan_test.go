@@ -164,6 +164,27 @@ func TestDatabaseMapRenamesOnlyTheMappedDatabase(t *testing.T) {
 	}
 }
 
+// TestTheShadowOfAResyncIsNamedAfterTheTargetTable: next to the table it replaces, whatever renames it.
+func TestTheShadowOfAResyncIsNamedAfterTheTargetTable(t *testing.T) {
+	renamed := map[string]config.TableOverride{"warehouse.orders": {TargetTable: "stock_orders"}}
+	tests := []struct {
+		name string
+		cfg  config.Tables
+		want string
+	}{
+		{"default", config.Tables{}, "orders__resync"},
+		{"target_database", config.Tables{TargetDatabase: "replica", Overrides: renamed}, "stock_orders__resync"},
+		{"database_map", config.Tables{DatabaseMap: map[string]string{"warehouse": "replica"}, Overrides: renamed}, "stock_orders__resync"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShadowName(&config.Config{Tables: tt.cfg}, "warehouse", "orders"); got != tt.want {
+				t.Errorf("ShadowName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveNamesAndColumns(t *testing.T) {
 	tbl, err := Resolve(ordersTable(), cfgWith(map[string]config.TableOverride{
 		"shop.orders": {TargetTable: "orders_v2", ExcludeColumns: []string{"email", "customer"}},

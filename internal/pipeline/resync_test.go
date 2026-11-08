@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thealexjo/binwave/internal/checkpoint"
+	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/errcode"
 	"github.com/thealexjo/binwave/internal/event"
 	"github.com/thealexjo/binwave/internal/gtid"
@@ -861,5 +862,41 @@ func TestThePositionIsSavedAsSoonAsATableIsReplaced(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("the finished resync was still in the saved state after the swap: %+v", entries)
+	}
+}
+
+// TestTheShadowTableIsNamedAfterTheTargetTable: tables of one name in two source databases have
+// different targets in one ClickHouse database, and a shadow named after the source would be shared.
+func TestTheShadowTableIsNamedAfterTheTargetTable(t *testing.T) {
+	for _, initialLoad := range []bool{false, true} {
+		t.Run(map[bool]string{false: "resync", true: "initial load"}[initialLoad], func(t *testing.T) {
+			items := itemsTable()
+			h := newHarness(t)
+			h.cfg.Tables.Overrides = map[string]config.TableOverride{"shop.items": {TargetTable: "goods"}}
+			h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(2)}
+			p := h.pipeline(t)
+			reply := make(chan error, 1)
+			h.source.script = []scriptedTx{uuidTx(1, insertRows(items, 1, "a")), uuidTx(2, insertRows(items, 2, "b"))}
+			if initialLoad {
+				h.cfg.Replication.InitialPosition = config.StartFromSnapshot
+				h.snapshot.(*fakeSnapshot).executed = fence(1)
+			} else {
+				h.source.beforeHandle = func(ev event.Event) {
+					if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":2" {
+						asks(p, reply)()
+					}
+				}
+			}
+			h.source.until = func() bool { return h.sink.swapped() > 0 }
+
+			if err := h.runPipeline(t, p); err != nil {
+				t.Fatalf("Run() = %v", err)
+			}
+			h.sink.mu.Lock()
+			defer h.sink.mu.Unlock()
+			if len(h.sink.swaps) != 1 || h.sink.swaps[0].Table != "goods" || h.sink.swaps[0].Shadow != "goods__resync" {
+				t.Errorf("swaps = %+v, want goods__resync in the place of goods", h.sink.swaps)
+			}
+		})
 	}
 }

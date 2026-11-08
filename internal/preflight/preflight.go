@@ -159,6 +159,7 @@ func Check(cat *schema.Catalog, cfg *config.Config) *Report {
 	fks := foreignKeysByTable(cat.ForeignKeys)
 
 	targets := map[string][]string{}
+	shadows := map[string]string{} // the shadow table of a resync of each table, and the table
 	seen := map[string]bool{}
 	for _, t := range cat.Tables {
 		seen[t.FullName()] = true
@@ -167,6 +168,7 @@ func Check(cat *schema.Catalog, cfg *config.Config) *Report {
 		db, name := chsink.TargetName(cfg, t.Database, t.Name)
 		key := db + "." + name
 		targets[key] = append(targets[key], t.FullName())
+		shadows[db+"."+chsink.ShadowName(cfg, t.Database, t.Name)] = t.FullName()
 	}
 
 	for target, sources := range targets {
@@ -175,6 +177,13 @@ func Check(cat *schema.Catalog, cfg *config.Config) *Report {
 			r.Problems = append(r.Problems, Problem{Severity: SevError, Scope: ScopeConfig, Code: errcode.TBL401, Message: fmt.Sprintf(
 				"tables %s would all be replicated into ClickHouse table %s; give them different targets with tables.overrides.<table>.target_table",
 				strings.Join(sources, ", "), target)})
+		}
+		if of, ok := shadows[target]; ok {
+			for _, src := range sources {
+				r.Problems = append(r.Problems, Problem{Severity: SevError, Scope: ScopeConfig, Code: errcode.TBL401, Message: fmt.Sprintf(
+					"table %s would be replicated into ClickHouse table %s, the shadow table of a resync of %s; give it another target with tables.overrides.<table>.target_table",
+					src, target, of)})
+			}
 		}
 	}
 

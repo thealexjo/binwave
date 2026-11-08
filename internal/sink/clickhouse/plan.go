@@ -112,6 +112,12 @@ func TargetName(cfg *config.Config, database, table string) (targetDB, targetTab
 	return targetDB, targetTable
 }
 
+// ShadowName is the name of the shadow table of a resync of database.table, next to its target table.
+func ShadowName(cfg *config.Config, database, table string) string {
+	_, target := TargetName(cfg, database, table)
+	return target + "__resync"
+}
+
 // nameSet checks that every name is a column of src and returns them as a set.
 func nameSet(src *schema.Table, full, setting string, names []string) (map[string]bool, error) {
 	set := make(map[string]bool, len(names))

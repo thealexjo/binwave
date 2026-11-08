@@ -60,7 +60,7 @@ const (
 	TBL203 Code = "TBL203" // tables.overrides names a column the table does not have
 	TBL204 Code = "TBL204" // every column of the table is excluded
 	TBL301 Code = "TBL301" // a foreign key has ON DELETE/UPDATE CASCADE, SET NULL or SET DEFAULT, which never reaches the binlog
-	TBL401 Code = "TBL401" // two source tables would be replicated into the same ClickHouse table
+	TBL401 Code = "TBL401" // two source tables would be replicated into the same ClickHouse table, or one into the shadow table of a resync of the other
 )
 
 // DDL — schema changes read from the binlog and applied (or deliberately not applied) to ClickHouse.

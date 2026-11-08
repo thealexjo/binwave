@@ -509,7 +509,7 @@ func (p *Pipeline) tablesToLoad(ctx context.Context, since string) ([]checkpoint
 			continue
 		}
 		entries = append(entries, checkpoint.Resync{
-			Table: t.FullName(), Shadow: t.Name + "__resync", Since: since, Started: now, InitialLoad: true,
+			Table: t.FullName(), Shadow: chsink.ShadowName(p.cfg, t.Database, t.Name), Since: since, Started: now, InitialLoad: true,
 			Estimate: t.EstimatedRows,
 		})
 	}
@@ -626,9 +626,9 @@ func (p *Pipeline) holdResync(name string, code errcode.Code, err error) error {
 
 // holdPending keeps a resync that has to begin again in the position, and stops replication on it.
 func (p *Pipeline) holdPending(j restartJob, err error) error {
-	_, table, _ := cutQualified(j.name)
+	db, table, _ := cutQualified(j.name)
 	st := checkpoint.Resync{
-		Table: j.name, Shadow: table + "__resync", Version: p.versions.Last(), Since: p.committed.GTIDSet,
+		Table: j.name, Shadow: chsink.ShadowName(p.cfg, db, table), Version: p.versions.Last(), Since: p.committed.GTIDSet,
 		Quarantined: j.quarantined, Restarts: j.restarts, Started: p.d.Now(),
 		InitialLoad: j.origin.initialLoad, Autoresync: j.origin.autoresync, Pending: true,
 	}
@@ -1089,7 +1089,7 @@ func (p *Pipeline) startResync(ctx context.Context, name string, def *schema.Tab
 			"try again when the stream has caught up", name)
 	}
 	tdb, _ := chsink.TargetName(p.cfg, db, table)
-	shadow := table + "__resync"
+	shadow := chsink.ShadowName(p.cfg, db, table)
 
 	// A resync creates a table, fills it, and drops the old one in the swap. Whether the user may is
 	// found out now, not in the middle of the swap, where a refusal would stop the service.

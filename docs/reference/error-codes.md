@@ -52,7 +52,7 @@ They lead to a quarantine (`tables.on_replication_error: quarantine`, the defaul
 | `TBL203` | `overrides` names a column that does not exist | — (configuration error) | fix the config |
 | `TBL204` | all columns are excluded | — (configuration error) | fix `exclude_columns` |
 | `TBL301` | a foreign key with `ON DELETE`/`ON UPDATE CASCADE`/`SET NULL`/`SET DEFAULT` | no | set `tables.foreign_key_cascades: warn` deliberately, or remove the cascade in the source |
-| `TBL401` | two source tables point to one ClickHouse table | — (configuration error) | separate them with `tables.overrides.<t>.target_table` or `tables.database_map` |
+| `TBL401` | two source tables point to one ClickHouse table, or one to the shadow table (`<table>__resync`) of the other | — (configuration error) | separate them with `tables.overrides.<t>.target_table` or `tables.database_map` |
 
 ## `DDL` — schema changes in the stream
 
