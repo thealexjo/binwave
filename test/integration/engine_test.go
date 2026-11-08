@@ -49,16 +49,18 @@ checkpoint: {store: %s, file_path: %q}
 
 // runningEngine is an engine started in the background.
 type runningEngine struct {
-	cancel context.CancelFunc
-	done   chan error
-	ready  chan struct{}
+	cancel   context.CancelFunc
+	done     chan error
+	ready    chan struct{}
+	finished chan struct{} // closed when Run has returned
 }
 
 func startEngine(t *testing.T, cfg *config.Config) *runningEngine {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &runningEngine{cancel: cancel, done: make(chan error, 1), ready: make(chan struct{}, 1)}
+	r := &runningEngine{cancel: cancel, done: make(chan error, 1), ready: make(chan struct{}, 1), finished: make(chan struct{})}
 	go func() {
+		defer close(r.finished)
 		r.done <- engine.New(cfg, quietLogger()).Run(ctx, app.Hooks{
 			Ready: func() {
 				select {
@@ -69,7 +71,7 @@ func startEngine(t *testing.T, cfg *config.Config) *runningEngine {
 			Progress: func() {},
 		})
 	}()
-	t.Cleanup(cancel)
+	t.Cleanup(func() { stopAndWait(t, cancel, r.finished) })
 
 	select {
 	case <-r.ready:
@@ -79,6 +81,16 @@ func startEngine(t *testing.T, cfg *config.Config) *runningEngine {
 		t.Fatal("the engine did not become ready")
 	}
 	return r
+}
+
+// stopAndWait stops an engine at the end of a test and waits until its last write is done.
+func stopAndWait(t *testing.T, cancel context.CancelFunc, finished <-chan struct{}) {
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(60 * time.Second):
+		t.Error("the engine did not stop")
+	}
 }
 
 // stop shuts the engine down like SIGTERM and returns its result.

@@ -29,13 +29,15 @@ func startHubEngine(t *testing.T, cfg *config.Config) *hubEngine {
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{}, 1)
 	done := make(chan error, 1)
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		done <- engine.New(cfg, quietLogger(), engine.WithObservability(hub)).Run(ctx, app.Hooks{
 			Ready:    func() { hub.Ready(); ready <- struct{}{} },
 			Progress: hub.Progress,
 		})
 	}()
-	t.Cleanup(cancel)
+	t.Cleanup(func() { stopAndWait(t, cancel, finished) })
 	select {
 	case <-ready:
 	case err := <-done:
