@@ -1,0 +1,25 @@
+# Example: one binwave container per MySQL source.
+#   docker compose -f deploy/docker/compose.example.yaml up -d
+# Secrets come from the environment (or an env_file) and are referenced in the config as "${NAME}".
+
+services:
+  binwave-main:
+    image: binwave:dev
+    restart: unless-stopped
+    # Graceful shutdown flushes buffers and commits the checkpoint.
+    stop_grace_period: 120s
+    environment:
+      BINWAVE_MYSQL_PASSWORD: ${BINWAVE_MYSQL_PASSWORD:?set BINWAVE_MYSQL_PASSWORD}
+      BINWAVE_CLICKHOUSE_PASSWORD: ${BINWAVE_CLICKHOUSE_PASSWORD:?set BINWAVE_CLICKHOUSE_PASSWORD}
+    volumes:
+      - ./main.yaml:/etc/binwave/config.yaml:ro
+      - binwave-main-state:/var/lib/binwave
+    ports:
+      - "127.0.0.1:9187:9187"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+volumes:
+  binwave-main-state:

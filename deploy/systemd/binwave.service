@@ -1,0 +1,75 @@
+# Example systemd unit for binwave: the single-instance case, one MySQL source → ClickHouse
+# pipeline for the whole host. For several sources on one host, use the template
+# binwave@.service instead, one instance per source.
+#
+#   install -m 0755 bin/binwave /usr/local/bin/binwave
+#   install -m 0644 deploy/systemd/binwave.service /etc/systemd/system/
+#   install -m 0640 -o root -g binwave config.yaml /etc/binwave/config.yaml
+#   systemctl enable --now binwave
+#
+# Requires a system user: useradd --system --no-create-home --shell /usr/sbin/nologin binwave
+
+[Unit]
+Description=binwave MySQL → ClickHouse replication
+Documentation=https://github.com/thealexjo/binwave
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# binwave reports READY=1 once both databases accepted the connection, the source requirements
+# and the rights checks passed and the binlog stream started; it pings the watchdog while the
+# pipeline makes progress.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60s
+# While a database is down at start, binwave retries inside retry.startup_budget (default 10m).
+# The start timeout must be longer, or systemd would kill the service in the middle of a retry.
+TimeoutStartSec=15min
+
+User=binwave
+Group=binwave
+# No --config: binwave defaults to /etc/binwave/config.yaml.
+ExecStart=/usr/local/bin/binwave run
+ExecReload=/bin/kill -HUP $MAINPID
+
+# SIGTERM → flush buffers and commit the checkpoint; give it time before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=120s
+
+Restart=on-failure
+RestartSec=5s
+# Exit code 78 (EX_CONFIG): invalid config or unmet source requirements — restarting will not help.
+RestartPreventExitStatus=78
+
+# Used only by the file checkpoint store (dev/tests); production keeps checkpoints in ClickHouse.
+StateDirectory=binwave
+StateDirectoryMode=0750
+
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
