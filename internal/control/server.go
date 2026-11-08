@@ -24,12 +24,8 @@ var umaskMu sync.Mutex
 // function is called. A socket left by a process that died is replaced; a socket that another
 // live service answers on is an error. The socket is private to the user of the process.
 func Serve(path string, b Backend, log *slog.Logger) (stop func(), err error) {
-	if conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", path); err == nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("control.socket %s is served by another process", path)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("remove the stale control socket %s: %w", path, err)
+	if err := removeStale(path); err != nil {
+		return nil, err
 	}
 
 	umaskMu.Lock()
@@ -59,6 +55,33 @@ func Serve(path string, b Backend, log *slog.Logger) (stop func(), err error) {
 		<-done
 		_ = os.Remove(path)
 	}, nil
+}
+
+// removeStale removes the socket that a process which died left at path, and nothing else: not a
+// file that is not a socket, and not a socket that may still be served.
+func removeStale(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("control.socket %s: %w", path, err)
+	}
+	if info.Mode().Type() != os.ModeSocket {
+		return fmt.Errorf("control.socket %s is not a socket, and binwave does not remove it: set control.socket to a path of its own", path)
+	}
+	conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", path)
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("control.socket %s is served by another process", path)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("control.socket %s: cannot tell whether another process serves it: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove the stale control socket %s: %w", path, err)
+	}
+	return nil
 }
 
 func handler(b Backend) http.Handler {

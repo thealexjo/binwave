@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -181,16 +182,42 @@ func TestStaleSocketIsReplacedAndALiveOneIsNot(t *testing.T) {
 		t.Fatal("a second service took the socket of a live one")
 	}
 	first()
-	if err := os.WriteFile(path, nil, 0o600); err != nil { // a stale file where the socket was
-		t.Fatal(err)
-	}
+	leftoverSocket(t, path)
 	stop, err := Serve(path, &fakeBackend{}, log)
 	if err != nil {
-		t.Fatalf("Serve() over a stale file = %v", err)
+		t.Fatalf("Serve() over a leftover socket = %v", err)
 	}
 	stop()
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the socket file stays after stop: %v", err)
+	}
+}
+
+// leftoverSocket leaves at path the socket of a process that died: the file is there, nobody listens.
+func leftoverSocket(t *testing.T, path string) {
+	t.Helper()
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestServeLeavesWhatIsNotASocketAlone: a control.socket set by mistake to the config or a checkpoint.
+func TestServeLeavesWhatIsNotASocketAlone(t *testing.T) {
+	path := filepath.Join(shortDir(t), "checkpoint.json")
+	if err := os.WriteFile(path, []byte(`{"gtid_set":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if stop, err := Serve(path, &fakeBackend{}, slog.New(slog.DiscardHandler)); err == nil {
+		stop()
+		t.Fatal("Serve() took the path of a regular file")
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != `{"gtid_set":"x"}` {
+		t.Errorf("the file is %q (%v), want it untouched", b, err)
 	}
 }
 
@@ -273,5 +300,24 @@ func TestChunkSizeReachesTheBackend(t *testing.T) {
 	fc, _ := serve(t, failing)
 	if err := fc.ChunkSize(context.Background(), 1000); err == nil {
 		t.Error("ChunkSize() with a failing backend returned nil")
+	}
+}
+
+// TestServeLeavesASocketItCannotDialAlone: a refused permission does not prove that nobody serves it.
+func TestServeLeavesASocketItCannotDialAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root dials a socket whatever its mode")
+	}
+	path := filepath.Join(shortDir(t), "c.sock")
+	leftoverSocket(t, path)
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if stop, err := Serve(path, &fakeBackend{}, slog.New(slog.DiscardHandler)); err == nil {
+		stop()
+		t.Fatal("Serve() removed a socket it could not dial")
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode().Type() != os.ModeSocket {
+		t.Errorf("the socket is gone: %v", err)
 	}
 }
