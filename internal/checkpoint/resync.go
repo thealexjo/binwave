@@ -63,6 +63,9 @@ type Resync struct {
 	// Autoresync marks a resync that tables.autoresync began on its own, from a quarantine whose
 	// reason a resync fixes (Quarantined.Recoverable), without an operator. Same note as InitialLoad.
 	Autoresync bool `json:"autoresync,omitempty"`
+	// Pending marks a resync that has to begin again from the start, with every check of a new one: a
+	// statement discarded it, and beginning it again failed with tables.on_replication_error: stop.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // CursorValue is one value of a primary key, in a form that survives JSON: the driver returns

@@ -9,13 +9,16 @@ import (
 	"time"
 
 	"github.com/thealexjo/binwave/internal/checkpoint"
+	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/ddl"
 	"github.com/thealexjo/binwave/internal/errcode"
 	"github.com/thealexjo/binwave/internal/event"
+	"github.com/thealexjo/binwave/internal/failure"
 	"github.com/thealexjo/binwave/internal/gtid"
 	"github.com/thealexjo/binwave/internal/schema"
 	chsink "github.com/thealexjo/binwave/internal/sink/clickhouse"
 	"github.com/thealexjo/binwave/internal/snapshot"
+	"github.com/thealexjo/binwave/internal/typemap"
 )
 
 // A resync reads a table again from the source and replaces its ClickHouse table with the result,
@@ -387,6 +390,9 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	tdb, _ := chsink.TargetName(p.cfg, db, name)
 	job := &resyncJob{state: st}
 	job.status = p.statusOf(job, snapshot.Progress{Fraction: -1})
+	if st.Pending {
+		return p.beginPending(ctx, st)
+	}
 
 	shape, err := p.shape(ctx, tdb, st.Shadow)
 	if err != nil {
@@ -408,6 +414,10 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("continue the resync of %s: %w", st.Table, ctx.Err())
+		}
+		if p.holdsResyncs() {
+			p.resyncs[st.Table] = job
+			return p.holdResync(st.Table, errcode.SYNC101, fmt.Errorf("could not continue after a restart: %w", err))
 		}
 		p.dropShadow(ctx, tdb, st.Shadow)
 		p.restoreQuarantine(st, "could not continue after a restart: "+err.Error())
@@ -591,6 +601,41 @@ func (p *Pipeline) restoreQuarantine(st checkpoint.Resync, why string) {
 		reason = st.Quarantined + " (" + reason + ")"
 	}
 	p.quarantine(st.Table, errcode.SYNC101, reason, st.Autoresync)
+}
+
+// holdsResyncs reports whether a resync that cannot go on stops replication instead of being given up:
+// with tables.on_replication_error: stop the table cannot be quarantined.
+func (p *Pipeline) holdsResyncs() bool {
+	return p.cfg.Tables.OnReplicationError != config.OnErrorQuarantine
+}
+
+// holdResync stops replication on a resync that cannot go on, keeping it as it is in the position,
+// so that resuming replication continues it.
+func (p *Pipeline) holdResync(name string, code errcode.Code, err error) error {
+	if job, ok := p.resyncs[name]; ok {
+		p.stopJob(job)
+	}
+	f := failure.Failure{Time: p.d.Now(), Kind: failure.KindResync, Table: name, Code: string(code), Message: err.Error()}
+	var conversion *typemap.ConversionError
+	if errors.As(err, &conversion) {
+		f.Detail = conversion.Detail()
+	}
+	p.log.Error("["+string(code)+"] resync stopped, replication stops with it", "table", name, "code", code, "error", err)
+	return &FailedError{Failure: f, Err: err}
+}
+
+// holdPending keeps a resync that has to begin again in the position, and stops replication on it.
+func (p *Pipeline) holdPending(j restartJob, err error) error {
+	_, table, _ := cutQualified(j.name)
+	st := checkpoint.Resync{
+		Table: j.name, Shadow: table + "__resync", Version: p.versions.Last(), Since: p.committed.GTIDSet,
+		Quarantined: j.quarantined, Restarts: j.restarts, Started: p.d.Now(),
+		InitialLoad: j.origin.initialLoad, Autoresync: j.origin.autoresync, Pending: true,
+	}
+	p.resyncs[j.name] = &resyncJob{state: st}
+	p.resyncSetChanged = true
+	p.syncResyncs()
+	return p.holdResync(j.name, errcode.SYNC101, fmt.Errorf("could not begin again after a DDL statement: %w", err))
 }
 
 // launch starts the goroutine that reads the chunks of a job.
@@ -948,6 +993,9 @@ func (p *Pipeline) swapReady(ctx context.Context) (bool, error) {
 			continue
 		}
 		if job.lostFinal != nil {
+			if p.holdsResyncs() {
+				return did, p.holdResync(job.state.Table, errcode.SYNC101, fmt.Errorf("its watermark cannot be read: %w", job.lostFinal))
+			}
 			p.abortResync(ctx, job.state.Table, fmt.Sprintf("its watermark cannot be read: %v", job.lostFinal), true)
 			did = true
 			continue
@@ -1110,6 +1158,9 @@ func (p *Pipeline) takeChunks(ctx context.Context, job *resyncJob) (bool, error)
 		case res := <-job.results:
 			did = true
 			if res.err != nil {
+				if p.holdsResyncs() {
+					return true, p.holdResync(job.state.Table, errcode.SYNC101, fmt.Errorf("the table could not be read: %w", res.err))
+				}
 				p.log.Error("resync failed: source read", "table", job.state.Table, "error", res.err)
 				p.abortResync(ctx, job.state.Table, fmt.Sprintf("the table could not be read: %v", res.err), true)
 				return true, nil //nolint:nilerr // the resync is what failed; the stream goes on and the table is quarantined
@@ -1134,6 +1185,9 @@ func (p *Pipeline) takeChunks(ctx context.Context, job *resyncJob) (bool, error)
 func (p *Pipeline) writeChunk(ctx context.Context, job *resyncJob, res chunkResult) error {
 	name := job.state.Table
 	if err := res.convert; err != nil {
+		if p.holdsResyncs() {
+			return p.holdResync(name, causeCode(err), fmt.Errorf("resync of %s: %w", name, err))
+		}
 		p.log.Error("resync failed: conversion", "table", name, "error", err)
 		p.abortResync(ctx, name, err.Error(), false)
 		return p.tableFailed(name, fmt.Errorf("resync of %s: %w", name, err))
@@ -1191,6 +1245,9 @@ func (p *Pipeline) finishIfReady(ctx context.Context, job *resyncJob, committed 
 	})
 	if err != nil {
 		if chsink.IsTableProblem(err) {
+			if p.holdsResyncs() {
+				return false, p.holdResync(name, errcode.SYNC101, fmt.Errorf("the table could not be replaced with its copy: %w", err))
+			}
 			p.abortResync(ctx, name, err.Error(), true)
 			return true, nil
 		}
@@ -1350,6 +1407,10 @@ func (p *Pipeline) interruptResyncs(ctx context.Context, e event.DDL, impacts []
 			"statement", e.Query, "rows_discarded", job.state.Rows, "restarts", job.state.Restarts)
 		state := job.state
 		p.abortResync(ctx, im.table, "a DDL statement changed the table", false)
+		if !im.restart && im.renamed != "" && p.holdsResyncs() {
+			// The renamed table holds the rows of before the resync, and nothing since: read it again.
+			im.restart, im.table = true, im.renamed
+		}
 		if !im.restart {
 			if im.renamed != "" {
 				p.quarantine(im.renamed, errcode.SYNC105, "renamed from "+im.table+" during its resync", state.Autoresync)
@@ -1378,19 +1439,45 @@ type restartJob struct {
 func (p *Pipeline) restartInterrupted(ctx context.Context) error {
 	jobs := p.restarting
 	p.restarting = nil
+	var held error
 	for _, j := range jobs {
 		db, table, _ := cutQualified(j.name)
 		def, err := p.tableDefinition(ctx, db, table)
-		if err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("begin the resync of %s again: %w", j.name, ctx.Err())
-			}
-			p.quarantine(j.name, errcode.SYNC101, "could not begin again after a DDL statement: "+err.Error(), j.origin.autoresync)
-			continue
+		if err == nil {
+			err = p.startResync(ctx, j.name, def, j.quarantined, j.restarts, j.origin)
 		}
-		if err := p.startResync(ctx, j.name, def, j.quarantined, j.restarts, j.origin); err != nil {
+		switch {
+		case err == nil:
+		case ctx.Err() != nil:
+			return fmt.Errorf("begin the resync of %s again: %w", j.name, ctx.Err())
+		case p.holdsResyncs():
+			if hold := p.holdPending(j, err); held == nil {
+				held = hold
+			}
+		default:
 			p.quarantine(j.name, errcode.SYNC101, "could not begin again after a DDL statement: "+err.Error(), j.origin.autoresync)
 		}
 	}
-	return nil
+	return held
+}
+
+// beginPending begins, after a restart, a resync that has to begin again from the start.
+func (p *Pipeline) beginPending(ctx context.Context, st checkpoint.Resync) error {
+	j := restartJob{
+		name: st.Table, quarantined: st.Quarantined, restarts: st.Restarts,
+		origin: resyncOrigin{initialLoad: st.InitialLoad, autoresync: st.Autoresync},
+	}
+	db, table, _ := cutQualified(st.Table)
+	def, err := p.tableDefinition(ctx, db, table)
+	if err == nil {
+		err = p.startResync(ctx, j.name, def, j.quarantined, j.restarts, j.origin)
+	}
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		return fmt.Errorf("begin the resync of %s again: %w", st.Table, ctx.Err())
+	default:
+		return p.holdPending(j, err)
+	}
 }

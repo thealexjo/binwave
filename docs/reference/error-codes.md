@@ -86,7 +86,7 @@ The process is alive, `binwave replication status` shows the GTID and the reason
 
 | Code | Reason | Recoverable by autoresync? | What to do |
 |---|---|---|---|
-| `SYNC101` | reading a chunk failed five times in a row with an error that does not go away by itself (an unavailable source does not count: the resync waits it out) — the resync or load gave up | depends on the reason (see `recoverable` of the record) | `binwave tables resync` once more, after sorting out the reason |
+| `SYNC101` | reading a chunk failed five times in a row with an error that does not go away by itself (an unavailable source does not count: the resync waits it out) — the resync or load gave up | depends on the reason (see `recoverable` of the record) | `binwave tables resync` once more, after sorting out the reason; with `on_replication_error: stop` the resync is kept and replication stops: `binwave replication resume` |
 | `SYNC102` | the shadow table disappeared — starting over | — | informational, nothing to do |
 | `SYNC103` | the structure changed while the service was not running — starting over | — | informational |
 | `SYNC104` | the shadow table could not be dropped | — | drop it manually (`DROP TABLE`); it is the table marked as a binwave shadow (comment) |

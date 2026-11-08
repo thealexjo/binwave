@@ -13,6 +13,7 @@ import (
 
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/control"
+	failinfo "github.com/thealexjo/binwave/internal/failure"
 	"github.com/thealexjo/binwave/internal/observability"
 	"github.com/thealexjo/binwave/internal/snapshot"
 	"github.com/thealexjo/binwave/internal/termstyle"
@@ -376,9 +377,12 @@ func printFailure(w io.Writer, st observability.Status) {
 	f := st.Failure
 	ts := termstyle.For(w)
 	fmt.Fprintf(w, "failed at:    %s (%s ago)\n", f.Time.UTC().Format(time.RFC3339), time.Since(f.Time).Round(time.Second))
-	if f.GTID != "" {
+	switch {
+	case f.GTID != "":
 		fmt.Fprintf(w, "transaction:  %s\n", f.GTID)
-	} else {
+	case f.Kind == failinfo.KindResync:
+		fmt.Fprintf(w, "transaction:  none: the failure is in a resync, which belongs to no transaction\n")
+	default:
 		fmt.Fprintf(w, "transaction:  none: the failure is at the write of buffered rows, which belong to several transactions\n")
 	}
 	fmt.Fprintf(w, "failure:      %s\n", ts.Failed(f.Kind))
@@ -407,6 +411,9 @@ func printFailure(w io.Writer, st observability.Status) {
 	}
 	fmt.Fprintln(w, "what to do:")
 	fmt.Fprintln(w, "  binwave replication resume                        try again, after the cause is fixed")
+	if f.Kind == failinfo.KindResync {
+		fmt.Fprintln(w, "  set tables.on_replication_error: quarantine       and restart: the resync is given up and the table quarantined")
+	}
 	if f.Skippable() {
 		fmt.Fprintln(w, "  binwave replication resume --skip-transactions 1  skip this transaction: its changes are NOT applied to ClickHouse")
 		fmt.Fprintf(w, "  binwave replication resume --gtid-next %s\n                                                    the same, naming the transaction\n", f.GTID)

@@ -634,6 +634,22 @@ func TestReplicationStatusOfAFailureOfAWriteOffersNoSkip(t *testing.T) {
 	assertContains(t, "stdout", stdout.String(), "resume ")
 }
 
+func TestReplicationStatusOfAFailureOfAResyncOffersQuarantine(t *testing.T) {
+	f := &fakeControl{status: observability.Status{
+		State:   observability.StateFailed,
+		Failure: &failinfo.Failure{Time: time.Now(), Kind: failinfo.KindResync, Table: "shop.orders", Code: "SYNC101", Message: "the table could not be read"},
+	}}
+	var stdout, stderr bytes.Buffer
+
+	runWith(context.Background(), []string{"replication", "status", "--config", writeConfig(t, controlConfig)}, &stdout, &stderr, controlDeps(f))
+
+	if strings.Contains(stdout.String(), "--skip-transactions") || strings.Contains(stdout.String(), "buffered rows") {
+		t.Errorf("a failure of a resync is described as a skippable transaction or a write:\n%s", stdout.String())
+	}
+	assertContains(t, "stdout", stdout.String(), "transaction:  none: the failure is in a resync")
+	assertContains(t, "stdout", stdout.String(), "tables.on_replication_error: quarantine")
+}
+
 func TestReplicationStatusShowsARebuildInProgress(t *testing.T) {
 	f := &fakeControl{status: observability.Status{State: observability.StateReady, Rebuilding: []string{"shop.orders"}}}
 	var stdout, stderr bytes.Buffer

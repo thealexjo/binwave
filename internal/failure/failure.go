@@ -19,6 +19,9 @@ const (
 	// KindWrite is a write of buffered rows that ClickHouse refused. The rows come from several
 	// transactions, so it is tied to none of them: it cannot be skipped, only fixed.
 	KindWrite = "write"
+	// KindResync is a resync or an initial load that cannot go on and cannot be quarantined; tied to no
+	// transaction, so it cannot be skipped.
+	KindResync = "resync"
 )
 
 // Failure is what could not be replicated.
