@@ -114,9 +114,9 @@ func (b *controlBackend) Release(ctx context.Context, tables []string) (released
 	}
 	released, unknown = a.p.Release(tables, fence)
 	// A running pipeline saves the change with its next position. A paused one has no next
-	// position, so the list is written now; the pipeline is not running, nothing races it.
-	if len(released) > 0 && a.repl.State().Paused {
-		if err := a.p.SaveQuarantine(ctx); err != nil {
+	// position, so the list is written now, and a resume waits until it is.
+	if len(released) > 0 {
+		if _, err := a.repl.whilePaused(func() error { return a.p.SaveQuarantine(ctx) }); err != nil {
 			return nil, nil, err
 		}
 	}

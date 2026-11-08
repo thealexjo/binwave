@@ -287,3 +287,36 @@ func TestOtherErrorsStillEndTheRun(t *testing.T) {
 		t.Errorf("loop() = %v, failures %d: only failures of the data are held for the operator", err, len(*seen))
 	}
 }
+
+// TestWorkWhilePausedHoldsAResumeBack: what is saved while paused is not overwritten by a pipeline
+// that a resume starts in the middle of it.
+func TestWorkWhilePausedHoldsAResumeBack(t *testing.T) {
+	r, _ := testReplicator(true)
+	s := newStub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runLoop(ctx, r, s)
+
+	var runsDuring int32
+	ran, err := r.whilePaused(func() error {
+		go r.Resume(control.ResumeRequest{})
+		time.Sleep(100 * time.Millisecond)
+		runsDuring = s.runs.Load()
+		return nil
+	})
+	if !ran || err != nil {
+		t.Fatalf("whilePaused() = %v, %v, want the work done", ran, err)
+	}
+	if runsDuring != 0 {
+		t.Errorf("the pipeline ran %d times during the work, want the resume to wait for it", runsDuring)
+	}
+	s.waitRunning(t)
+
+	ran, err = r.whilePaused(func() error {
+		t.Error("the work was done while replication runs")
+		return nil
+	})
+	if ran || err != nil {
+		t.Errorf("whilePaused() while running = %v, %v, want nothing done", ran, err)
+	}
+}

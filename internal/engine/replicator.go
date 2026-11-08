@@ -78,6 +78,17 @@ func (r *replicator) State() ReplicationState {
 	return ReplicationState{Paused: r.paused, Since: r.since, Failure: r.failure}
 }
 
+// whilePaused runs fn if replication is paused, and keeps it paused until fn returns: a resume waits.
+// fn must not call the replicator.
+func (r *replicator) whilePaused(fn func() error) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.paused {
+		return false, nil
+	}
+	return true, fn()
+}
+
 // Pause stops the pipeline and waits until it has stopped. It returns at once when replication is
 // already paused. It fails when the pipeline cannot stop cleanly, which stops the service as any
 // failure of the pipeline does.
