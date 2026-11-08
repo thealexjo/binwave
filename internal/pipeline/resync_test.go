@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -896,6 +897,47 @@ func TestTheShadowTableIsNamedAfterTheTargetTable(t *testing.T) {
 			defer h.sink.mu.Unlock()
 			if len(h.sink.swaps) != 1 || h.sink.swaps[0].Table != "goods" || h.sink.swaps[0].Shadow != "goods__resync" {
 				t.Errorf("swaps = %+v, want goods__resync in the place of goods", h.sink.swaps)
+			}
+		})
+	}
+}
+
+// TestATableBoundDuringAResyncCannotTakeItsTables: the table being resynchronized has no row since
+// the resync began, so nothing of it is bound; a table seen for the first time is still refused the
+// shadow, whose rows the swap would publish, and the target, which the swap replaces.
+func TestATableBoundDuringAResyncCannotTakeItsTables(t *testing.T) {
+	for _, target := range []string{"items__resync", "items"} {
+		t.Run(target, func(t *testing.T) {
+			items, other := itemsTable(), otherTable()
+			h := newHarness(t)
+			h.cfg.Tables.Overrides = map[string]config.TableOverride{"shop.other": {TargetTable: target}}
+			h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(10)}
+			p := h.pipeline(t)
+			reply := make(chan error, 1)
+			h.source.script = []scriptedTx{
+				uuidTx(1, insertRows(items, 1, "a")),
+				uuidTx(2, insertRows(items, 2, "b")),
+				uuidTx(3, insertRows(other, 3, "c")),
+			}
+			h.source.beforeHandle = func(ev event.Event) {
+				if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":2" {
+					asks(p, reply)()
+				}
+			}
+			h.source.until = heartbeatsFor(100000)
+
+			err := h.runPipeline(t, p)
+			prepared := map[string]int{}
+			for _, e := range h.journal.all() {
+				if table, ok := strings.CutPrefix(e, "ensure "); ok {
+					prepared[table]++
+				}
+			}
+			if len(prepared) != 1 || prepared["shop.items"] != 2 {
+				t.Errorf("tables prepared = %v, want only the target and the shadow of shop.items", prepared)
+			}
+			if err == nil || !strings.Contains(err.Error(), "shop.items") || !strings.Contains(err.Error(), "shop.other") {
+				t.Fatalf("Run() = %v, want an error naming both source tables", err)
 			}
 		})
 	}

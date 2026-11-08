@@ -643,7 +643,7 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 	}
 	// The target is one database, so tables of the same name in different source databases would
 	// share a ClickHouse table and overwrite each other's rows without any error.
-	if owner, taken := p.targets[t.FullName()]; taken && owner != name {
+	if owner, taken := p.ownerOf(t.FullName()); taken && owner != name {
 		return nil, fmt.Errorf("source tables %s and %s would both be written to ClickHouse table %s; "+
 			"give one of them another name with tables.overrides.<database.table>.target_table", owner, name, t.FullName())
 	}
@@ -669,6 +669,24 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 	p.targets[t.FullName()] = name
 	p.log.Info("replicating table", "source", name, "target", t.FullName(), "order_by", t.OrderBy)
 	return b, nil
+}
+
+// ownerOf returns the source table that writes to a ClickHouse table: a bound one, or one being
+// resynchronized, which holds its target and its shadow until the resync is swapped in or given up.
+func (p *Pipeline) ownerOf(target string) (string, bool) {
+	if owner, ok := p.targets[target]; ok {
+		return owner, true
+	}
+	for name, job := range p.resyncs {
+		db, table, _ := cutQualified(name)
+		tdb, ttable := chsink.TargetName(p.cfg, db, table)
+		for _, held := range []string{ttable, job.state.Shadow} {
+			if target == (&chsink.Table{Database: tdb, Name: held}).FullName() {
+				return name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // add appends converted rows to the table's buffer.
