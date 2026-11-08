@@ -1,0 +1,76 @@
+source:
+    mysql:
+        host: mysql.local
+        port: 3306
+        user: binwave
+        password: '******'
+        server_id: 42
+        tls:
+            mode: preferred
+            ca_file: ""
+            cert_file: ""
+            key_file: ""
+        heartbeat_period: 5s
+        compression: true
+target:
+    clickhouse:
+        addresses:
+            - ch.local:9000
+        database: replica
+        user: default
+        password: '******'
+        tls:
+            mode: disabled
+            ca_file: ""
+            cert_file: ""
+            key_file: ""
+        cluster: ""
+replication:
+    autostart: true
+    initial_position: now
+    gtid: ""
+    snapshot:
+        parallelism: 4
+        max_rows_per_second: 0
+        chunk_size: 1000
+        adaptive_chunks: true
+        largest_first: true
+        chunk_max_bytes: 32MiB
+control:
+    socket: ""
+checkpoint:
+    store: clickhouse
+    table: binwave_state
+    file_path: ""
+tables:
+    include:
+        - shop.*
+    exclude: []
+    target_database: ""
+    database_map: {}
+    on_replication_error: quarantine
+    foreign_key_cascades: error
+    autoresync: false
+    overrides: {}
+buffer:
+    max_rows: 100000
+    max_bytes: 64MiB
+    flush_interval: 250ms
+    catchup_flush_interval: 5s
+    max_memory: 1GiB
+    insert_parallelism: 4
+retry:
+    overload_budget: 10m0s
+    startup_budget: 10m0s
+    initial_delay: 500ms
+    max_delay: 30s
+    attempt_timeout: 2m0s
+ddl:
+    mode: full
+    dry_run: false
+    on_missing_structure: stop
+observability:
+    listen: 127.0.0.1:9187
+    log_level: info
+    log_format: text
+    pprof: false

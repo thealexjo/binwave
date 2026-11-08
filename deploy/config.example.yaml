@@ -1,0 +1,93 @@
+# binwave configuration example. Every commented value is the default.
+# Scalar values may reference environment variables as ${NAME} (use $${ for a literal "${").
+# Quote a reference to force a string: password: "${MYSQL_PASSWORD}".
+
+source:
+  mysql:
+    host: 127.0.0.1
+    # port: 3306
+    user: binwave
+    password: "${BINWAVE_MYSQL_PASSWORD}"
+    server_id: 4101                 # required, unique among the source's replicas
+    # heartbeat_period: 5s          # a source silent for three periods is declared frozen and binwave exits
+    tls:
+      mode: preferred               # disabled | preferred | required | verify-full
+      # ca_file: /etc/binwave/mysql-ca.pem
+      # cert_file: ""
+      # key_file: ""
+
+target:
+  clickhouse:
+    addresses: ["127.0.0.1:9000"]
+    database: replica               # holds binwave's own state table (the replication position)
+    user: binwave                   # default: default
+    password: "${BINWAVE_CLICKHOUSE_PASSWORD}"
+    tls:
+      mode: disabled                # disabled | required | verify-full (use the TLS port, usually 9440)
+    # cluster: ""                   # ON CLUSTER + Replicated* engines: not supported yet
+
+replication:
+  # initial_position: now           # now | gtid | snapshot — used only when no checkpoint exists
+  # gtid: ""                        # required with initial_position: gtid
+  # autostart: true                 # false: the service comes up and checks both databases but reads nothing until `binwave replication resume` (like MySQL's skip_replica_start)
+  snapshot:
+    # parallelism: 4                 # tables the initial load reads in chunks at the same time; a `tables resync` is not held to this
+    # max_rows_per_second: 0         # combined speed of every table the initial load is reading at once; 0 is unlimited
+    # largest_first: true            # read the biggest tables of the initial load first: the order decides when the load ends
+    # chunk_size: 1000               # rows one chunk asks for: every chunk without adaptive_chunks, the first one with it
+    # adaptive_chunks: true          # size each chunk from how long the ones before it took (about 0.5s per chunk, 100..100000 rows); false keeps every chunk at chunk_size
+    # chunk_max_bytes: 32MiB         # a chunk is held in memory whole: this bounds it whatever chunk_size says; 0 removes the bound
+
+control:
+  # socket: /var/lib/binwave/binwave.sock  # Unix socket for `binwave replication pause|resume|status` and `binwave tables`; private to the service's user; default: $STATE_DIRECTORY/binwave.sock, empty without it disables the channel
+
+checkpoint:
+  # store: clickhouse               # clickhouse | file
+  # table: binwave_state
+  # file_path: ""                   # file store; default $STATE_DIRECTORY/checkpoint.json
+
+tables:
+  include: ["shop.*"]               # "database.table" globs. The temporary tables of pt-online-schema-change (_t_new, _t_old) and gh-ost (_t_gho, _t_del) for the tables selected here are replicated too, so the swap of a migration is a rename in ClickHouse; a shadow with another name (--new-table-name, --force-table-name) has to be listed
+  exclude: ["shop.tmp_*"]
+  # target_database: ""             # default: each table goes to a ClickHouse database named like its MySQL database; set it to collect all tables in one database
+  # database_map: {}                # rename one source database on its way to ClickHouse, e.g. {shop: shop_mirror}; a database not named here keeps its own name. tables.overrides stays keyed by the source database regardless. Cannot be combined with target_database
+  # on_replication_error: quarantine  # quarantine | stop; a table that cannot be replicated (unconvertible value, unresolvable schema change, no key) is set aside and the others go on; stop halts the whole service. See "binwave tables list"
+  # foreign_key_cascades: error     # error | warn | ignore; ON DELETE/UPDATE CASCADE never reaches the binlog, so ClickHouse would keep rows MySQL has deleted; error puts such a table under on_replication_error
+  # autoresync: false                # resynchronize a quarantined table by itself (no operator) when the reason is one a resync fixes on its own (a generated column, an expression default, a type change MySQL recalculates); never for a table quarantined for a reason a resync cannot fix (no key, for instance)
+  overrides:
+    shop.users:
+      target_table: users
+      exclude_columns: [email, phone, password_hash]
+      # order_by: [id]              # default: source primary key; must include every primary key column (it may add more)
+      columns:
+        is_vip: { type: Bool }
+        status: { type: "Enum8('active' = 1, 'blocked' = 2)" }
+
+buffer:
+  # max_rows: 100000
+  # max_bytes: 64MiB
+  # flush_interval: 250ms          # longest a change waits in memory at the head of the binlog: this is the lag an operator sees
+  # catchup_flush_interval: 5s     # used instead while the stream is further behind than this: batches matter there, the delay does not
+  # max_memory: 1GiB
+  # insert_parallelism: 4          # tables one flush writes at the same time; 1 writes them one after another
+
+retry:
+  # initial_delay: 500ms           # wait between attempts: starts here, doubles up to max_delay
+  # max_delay: 30s
+  # attempt_timeout: 2m            # a ClickHouse request that does not answer is cut and retried; must exceed the longest insert
+  # startup_budget: 10m            # how long to keep retrying while MySQL or ClickHouse is unreachable at start; wrong credentials and missing privileges stop the service at once
+  # overload_budget: 10m           # how long ClickHouse may stay overloaded (too many parts and the like) before binwave stops; network outages are retried without limit
+
+ddl:
+  # mode: full                      # additive | full; what binwave applies to ClickHouse by itself: additive creates tables, adds columns and widens numeric columns; full also drops and renames columns and renames tables (the swap of pt-online-schema-change and gh-ost is a rename). Renaming a table needs the DROP TABLE privilege in ClickHouse, which it asks for on the source of a RENAME TABLE
+  # dry_run: false                  # true: nothing is executed, the log shows the statements to run. Use it to preview, or to keep the ClickHouse schema by hand and run the logged statements yourself
+  # on_missing_structure: stop      # stop | quarantine; what to do when a table or column to write is missing in ClickHouse (with dry_run binwave does not create it; a table may also be dropped later).
+                                    #   stop: the service stops, nothing is lost; create it and restart, every change is still in the binlog.
+                                    #   quarantine: the table is set aside and the others go on, but the changes made until the structure exists
+                                    #   and the table is released are NOT in ClickHouse (only a resynchronization brings them back). Needs tables.on_replication_error: quarantine.
+
+observability:
+  # listen: 127.0.0.1:9187          # /metrics /healthz /readyz /status; use 0.0.0.0:9187 inside Docker; no authentication
+  # log_level: info                 # debug | info | warn | error
+  # log_format: text                # json | text; no timestamp in either (journald/Docker already add one)
+  # pprof: false                    # true also serves /debug/pprof on the same address: go tool pprof http://host:9187/debug/pprof/profile?seconds=30

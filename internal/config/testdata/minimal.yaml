@@ -1,0 +1,13 @@
+source:
+  mysql:
+    host: mysql.local
+    user: binwave
+    password: secret-mysql
+    server_id: 42
+target:
+  clickhouse:
+    addresses: ["ch.local:9000"]
+    database: replica
+    password: secret-ch
+tables:
+  include: ["shop.*"]
