@@ -272,9 +272,17 @@ func startBinwave(t *testing.T, cfgPath string) *proc {
 		close(p.done)
 	}()
 	t.Cleanup(func() {
-		if !p.exited() {
+		running := !p.exited()
+		if running {
 			_ = p.cmd.Process.Kill()
 			<-p.done
+		}
+		if t.Failed() {
+			state := fmt.Sprintf("exited with code %d", p.exit)
+			if running {
+				state = "was still running"
+			}
+			t.Logf("binwave %s; its output:\n%s", state, p.out.String())
 		}
 	})
 	return p
