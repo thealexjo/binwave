@@ -82,7 +82,7 @@ Two equivalent options; they differ only in whether Go is needed on the host:
   ssh user@host
 
   # if there is no Go yet:
-  curl -fsSL https://go.dev/dl/go1.27.1.linux-amd64.tar.gz -o /tmp/go.tar.gz   # arm64 → go1.27.1.linux-arm64.tar.gz
+  curl -fsSL https://go.dev/dl/go1.27.3.linux-amd64.tar.gz -o /tmp/go.tar.gz   # arm64 → go1.27.3.linux-arm64.tar.gz
   rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tar.gz
   export PATH=$PATH:/usr/local/go/bin
   echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile

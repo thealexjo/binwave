@@ -67,8 +67,8 @@ func TestPauseStopsThePipelineAndResumeStartsItAgain(t *testing.T) {
 		t.Errorf("state after the pause = %+v", st)
 	}
 	select {
-	case <-done:
-		t.Fatal("the loop ended: a pause must leave the service running")
+	case err := <-done:
+		t.Fatalf("the loop ended (%v): a pause must leave the service running", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	if waits.Load() == 0 {

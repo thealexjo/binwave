@@ -1,8 +1,8 @@
-GOLANGCI_LINT_VERSION := v2.13.2
+GOLANGCI_LINT_VERSION := v2.15.0
 
 BIN_DIR   := $(CURDIR)/bin
 BINARY    := $(BIN_DIR)/binwave
-LINTER    := $(BIN_DIR)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+LINTER    := $(BIN_DIR)/golangci-lint-$(GOLANGCI_LINT_VERSION)-$(shell go env GOVERSION)
 IMAGE     ?= binwave:dev
 FUZZTIME  ?= 30s
 
