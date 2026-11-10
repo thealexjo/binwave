@@ -1,0 +1,26 @@
+# The demo configuration: the passwords are the demo's own; a real config takes them as ${NAME}.
+
+source:
+  mysql:
+    host: mysql
+    user: binwave
+    password: demo
+    server_id: 4101
+    tls: {mode: disabled}
+
+target:
+  clickhouse:
+    addresses: ["clickhouse:9000"]
+    database: replica
+    user: binwave
+    password: demo
+
+replication:
+  initial_position: snapshot        # the rows already in MySQL are loaded first
+
+tables:
+  include: ["shop.*"]
+  target_database: replica          # shop.items is replicated into replica.items
+
+observability:
+  listen: 0.0.0.0:9187

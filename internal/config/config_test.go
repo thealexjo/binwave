@@ -159,6 +159,12 @@ func TestExampleConfigIsValid(t *testing.T) {
 	}
 }
 
+func TestDemoConfigIsValid(t *testing.T) {
+	if _, err := Parse(readFile(t, "../../deploy/docker/demo/config.yaml"), noEnv); err != nil {
+		t.Fatalf("deploy/docker/demo/config.yaml is invalid: %v", err)
+	}
+}
+
 func TestFileCheckpointPathFromStateDirectory(t *testing.T) {
 	const doc = minimal + "checkpoint: {store: file}\n"
 
