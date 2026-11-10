@@ -38,6 +38,9 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+      # The notes go back to the previous release, past its candidates; those of the first one to the start.
+      - id: previous
+        run: echo "ref=$(git describe --tags --abbrev=0 --exclude '*-*' HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)" >> "$GITHUB_OUTPUT"
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: v2.20.0
@@ -45,6 +48,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }} # a commit may carry a release candidate's tag too
+          GORELEASER_PREVIOUS_TAG: ${{ steps.previous.outputs.ref }}
       # GitHub keeps attestations only for a public repository of a user.
       - if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

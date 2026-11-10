@@ -29,11 +29,6 @@ archives:
 checksum:
   name_template: checksums.txt
 
-git:
-  # The notes of a release go back to the previous release, past its release candidates.
-  ignore_tags:
-    - "{{ if not .Prerelease }}*-rc.*{{ end }}"
-
 changelog:
   use: git
   sort: asc
