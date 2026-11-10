@@ -1,4 +1,5 @@
 GOLANGCI_LINT_VERSION := v2.15.0
+GOVULNCHECK_VERSION   := v1.9.0
 
 BIN_DIR   := $(CURDIR)/bin
 BINARY    := $(BIN_DIR)/binwave
@@ -70,6 +71,10 @@ cover: ## Run unit tests with a coverage report
 .PHONY: lint
 lint: $(LINTER) ## Run golangci-lint (all build tags)
 	$(LINTER) run --build-tags integration,e2e ./...
+
+.PHONY: vuln
+vuln: ## Report known vulnerabilities in the dependencies and the Go standard library
+	GOTOOLCHAIN=$$(go env GOVERSION) go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags integration,e2e ./...
 
 .PHONY: fmt
 fmt: $(LINTER) ## Format code
