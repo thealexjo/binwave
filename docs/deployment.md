@@ -15,7 +15,7 @@ binwave connects to the MySQL server named in the config and checks the requirem
 
 ```sql
 SHOW VARIABLES LIKE 'log_bin';                    -- ON
-SHOW VARIABLES LIKE 'log_slave_updates';           -- ON — see below, separate from the general requirements
+SHOW VARIABLES LIKE 'log_slave_updates';           -- ON, when binwave reads from a replica
 SHOW VARIABLES LIKE 'binlog_format';               -- ROW
 SHOW VARIABLES LIKE 'binlog_row_image';            -- FULL
 SHOW VARIABLES LIKE 'binlog_row_metadata';         -- FULL
@@ -27,9 +27,6 @@ SELECT VERSION();                                  -- 8.0.36+ or 8.4.x
 ```
 
 The exact list of what the service itself checks at start is `internal/source/mysql/requirements.go`; on a mismatch the service does not start and names what is missing (exit code 78).
-
-> [!IMPORTANT]
-> **The one replica-specific thing the standard list does not cover:** `log_slave_updates=ON`. Without it, the replica does not write to its own binlog what it applied from replication from the primary — in this case binwave sees nothing at all (not an error but silence, so it is easy to miss). If this parameter is off, you have to turn it on and restart `mysqld` on the replica — this is the only real change the replica may need specifically for binwave; the other items are almost certainly already met if this is a healthy replica on a supported version.
 
 To confirm everything at once without a single change in the databases, after the config is written (step 5), use the command `binwave check --connect`.
 
@@ -187,7 +184,7 @@ binwave check --print     # config validation, secrets masked
 binwave check --connect   # + connections, source requirements, privileges, table checks
 ```
 
-Exit code: `0` — all is well, `78` — the configuration does not fit these databases, `1` — a database is unavailable. If the replica does not pass `log_slave_updates`, it will not be an error here either (binwave does not check this variable); check it manually once more before the start.
+Exit code: `0` — all is well, `78` — the configuration does not fit these databases, `1` — a database is unavailable.
 
 ## 8. Starting and watching
 
