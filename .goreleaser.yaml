@@ -1,0 +1,49 @@
+# Release binaries and notes for a v* tag; the image is built from the Dockerfile by .github/workflows/release.yml.
+version: 2
+
+project_name: binwave
+
+builds:
+  - main: ./cmd/binwave
+    binary: binwave
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    # The same symbols as make build: no -s -w, so profilers show the names of the functions.
+    ldflags:
+      - -X github.com/thealexjo/binwave/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/thealexjo/binwave/internal/buildinfo.Commit={{ .ShortCommit }}
+      - -X github.com/thealexjo/binwave/internal/buildinfo.Date={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - deploy/config.example.yaml
+      - deploy/systemd/*.service
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?!?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.+\))?!?:'
+      order: 1
+    - title: Other changes
+      order: 2
+  filters:
+    exclude:
+      - '^(ci|test|chore)(\(.+\))?:'
+
+release:
+  prerelease: auto

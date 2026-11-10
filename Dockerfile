@@ -2,7 +2,8 @@
 
 ARG GO_VERSION=1.27.3
 
-FROM golang:${GO_VERSION} AS build
+# The compiler runs on the platform of the build and cross-compiles for the target one.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -12,11 +13,24 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
+ARG TARGETOS
+ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    make build VERSION=${VERSION} COMMIT=${COMMIT} DATE=${DATE}
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} make build VERSION=${VERSION} COMMIT=${COMMIT} DATE=${DATE}
 
 # Static binary, no shell, non-root (uid 65532), CA certificates included.
-FROM gcr.io/distroless/static-debian13:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+LABEL org.opencontainers.image.title="binwave" \
+      org.opencontainers.image.description="Real-time replication of MySQL changes into ClickHouse" \
+      org.opencontainers.image.source="https://github.com/thealexjo/binwave" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}"
 
 COPY --from=build /src/bin/binwave /usr/local/bin/binwave
 

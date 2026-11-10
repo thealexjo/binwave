@@ -4,7 +4,7 @@
 
 services:
   binwave-main:
-    image: binwave:dev
+    image: ghcr.io/thealexjo/binwave:0.1   # 0.1 follows the patch releases of 0.1
     restart: unless-stopped
     # Graceful shutdown flushes buffers and commits the checkpoint.
     stop_grace_period: 120s

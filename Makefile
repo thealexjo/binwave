@@ -1,5 +1,7 @@
 GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
+GORELEASER_VERSION    := v2.20.0
+GORELEASER            := GOTOOLCHAIN=$$(go env GOVERSION) go run github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
 
 BIN_DIR   := $(CURDIR)/bin
 BINARY    := $(BIN_DIR)/binwave
@@ -62,6 +64,14 @@ docker-build: ## Build the Docker image (IMAGE, default binwave:dev)
 .PHONY: verify-docker
 verify-docker: docker-build ## Smoke-test the Docker image
 	./scripts/verify-docker.sh $(IMAGE)
+
+.PHONY: release-check
+release-check: ## Validate .goreleaser.yaml
+	$(GORELEASER) check
+
+.PHONY: release-snapshot
+release-snapshot: ## Build the release archives into ./dist without publishing anything
+	$(GORELEASER) release --snapshot --clean
 
 .PHONY: cover
 cover: ## Run unit tests with a coverage report

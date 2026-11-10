@@ -52,7 +52,25 @@ GRANT CREATE TABLE, INSERT, SELECT, ALTER TABLE, DROP TABLE ON replica.* TO binw
 
 If `tables.target_database` is not set, the target databases are named like the source databases and are created/checked lazily on the first write into each of them — then the privileges are needed there too (`INSERT`; with auto-DDL on, `CREATE TABLE` and `ALTER TABLE`; and with `ddl.mode: full`, also `DROP TABLE`, because `RENAME TABLE` in ClickHouse requires it on the source table). The simplest way is to grant the same privileges on all databases replication should go to, or to set `tables.target_database` right away so that everything goes into one database with the privileges already granted.
 
-## 4. Code: getting and building it
+## 4. Getting binwave
+
+### From a release
+
+Every release has static binaries for Linux (`amd64`, `arm64`) with the unit files and the config example, and an image `ghcr.io/thealexjo/binwave` for both architectures:
+
+```bash
+VERSION=0.1.0
+ARCH=amd64     # uname -m on the host: x86_64 → amd64, aarch64 → arm64
+curl -fsSLO https://github.com/thealexjo/binwave/releases/download/v$VERSION/binwave_${VERSION}_linux_$ARCH.tar.gz
+curl -fsSLO https://github.com/thealexjo/binwave/releases/download/v$VERSION/checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+tar xzf binwave_${VERSION}_linux_$ARCH.tar.gz
+sudo install -m 0755 binwave /usr/local/bin/binwave
+```
+
+Where an archive or an image was built is attested by GitHub: `gh attestation verify binwave_${VERSION}_linux_$ARCH.tar.gz --repo thealexjo/binwave`, and `gh attestation verify oci://ghcr.io/thealexjo/binwave:$VERSION --repo thealexjo/binwave` for the image.
+
+### From the source
 
 The repository is needed only for the build — it is not part of the service contract. Do not put the sources into `/etc/binwave` (only the config goes there) or into `/var/lib/binwave` (the service `StateDirectory`, owned by the system user `binwave`; code does not belong there). After the build only one file stays on the host — `/usr/local/bin/binwave`; the sources can be deleted, or kept only for future updates; they do not affect the running service.
 
@@ -151,7 +169,7 @@ Two equivalent, equally compact options — choose by what is already the practi
 
 Here there is one source, so the simpler unit without an instance name fits — `binwave.service`, with the default config `/etc/binwave/config.yaml` (if there is more than one source, use the template `binwave@.service` with an explicit `/etc/binwave/<instance>.yaml` for each).
 
-`/usr/local/bin/binwave` (step 4) and `binwave.yaml` (step 5) are already in place; from the repository clone on the host you also need the unit file:
+`/usr/local/bin/binwave` (step 4) and `binwave.yaml` (step 5) are already in place; from the release archive or the repository clone you also need the unit file:
 
 ```bash
 useradd --system --no-create-home --shell /usr/sbin/nologin binwave
@@ -168,7 +186,7 @@ Do not start it right away — check first (step 7).
 ### Option B: Docker
 
 ```bash
-make docker-build IMAGE=binwave:local
+docker pull ghcr.io/thealexjo/binwave:0.1   # or build it from the source: make docker-build IMAGE=binwave:local
 ```
 
 The config is mounted as a file at `/etc/binwave/config.yaml`; secrets come through environment variables, which the config substitutes itself as `${ENV}`. A compose example is `deploy/docker/compose.example.yaml`. The image is distroless, non-root, without a shell — CLI commands (`replication status` and the like) run through `docker exec` with the same binary inside the container.
