@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -222,8 +223,10 @@ func (s *failingStub) run(ctx context.Context, req control.ResumeRequest) error 
 
 var errData = errors.New("a transaction the target cannot take")
 
-func failureReplicator() (*replicator, *[]failure.Failure) {
+// failureReplicator returns a replicator and the number of failures reported to onFailed so far.
+func failureReplicator() (*replicator, func() int) {
 	r, _ := testReplicator(false)
+	var mu sync.Mutex
 	var seen []failure.Failure
 	r.classify = func(err error) (failure.Failure, bool) {
 		if errors.Is(err, errData) {
@@ -231,8 +234,16 @@ func failureReplicator() (*replicator, *[]failure.Failure) {
 		}
 		return failure.Failure{}, false
 	}
-	r.onFailed = func(f failure.Failure) { seen = append(seen, f) }
-	return r, &seen
+	r.onFailed = func(f failure.Failure) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, f)
+	}
+	return r, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen)
+	}
 }
 
 // TestFailureStopsThePipelineAndTheServiceWaitsForTheOperator: the process does not exit; it waits
@@ -247,9 +258,9 @@ func TestFailureStopsThePipelineAndTheServiceWaitsForTheOperator(t *testing.T) {
 	go func() { done <- r.loop(ctx, s.run) }()
 	<-s.reqs // the run that fails
 
-	waitFor(t, "the failed state", func() bool { st := r.State(); return st.Paused && st.Failure != nil })
-	if st := r.State(); st.Failure.GTID != "u:5" || len(*seen) != 1 {
-		t.Errorf("state %+v, reported %d failures", st, len(*seen))
+	waitFor(t, "the failure reported", func() bool { st := r.State(); return st.Paused && st.Failure != nil && seen() > 0 })
+	if st := r.State(); st.Failure.GTID != "u:5" || seen() != 1 {
+		t.Errorf("state %+v, reported %d failures", st, seen())
 	}
 	select {
 	case err := <-done:
@@ -283,8 +294,8 @@ func TestOtherErrorsStillEndTheRun(t *testing.T) {
 
 	err := r.loop(ctx, s.run)
 
-	if !errors.Is(err, boom) || len(*seen) != 0 {
-		t.Errorf("loop() = %v, failures %d: only failures of the data are held for the operator", err, len(*seen))
+	if !errors.Is(err, boom) || seen() != 0 {
+		t.Errorf("loop() = %v, failures %d: only failures of the data are held for the operator", err, seen())
 	}
 }
 
