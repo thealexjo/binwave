@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/thealexjo/binwave/internal/app"
@@ -111,7 +112,7 @@ func TestGuardLetsACascadePassUnderWarnAndIgnore(t *testing.T) {
 func TestGuardSkipsTablesThePreflightHasVetted(t *testing.T) {
 	reader := &fakeCatalog{cat: cascadingCatalog()}
 	g := newTableGuard(reader, guardConfig(config.CascadesError), slog.New(slog.DiscardHandler))
-	g.markChecked(reader.cat)
+	g.markChecked(reader.cat, &preflight.Report{})
 
 	if problem, err := g.CheckTable(context.Background(), "shop", "orders"); err != nil || problem != nil || reader.calls != 0 {
 		t.Errorf("(%v, %v), catalog reads = %d; a vetted table must not be read again", problem, err, reader.calls)
@@ -325,5 +326,76 @@ func TestPreflightDoesNotSetATableAsideForWhatAConcurrentStatementChanged(t *tes
 				t.Error("the problem was not confirmed by a read of the table alone")
 			}
 		})
+	}
+}
+
+// pausingCatalog is fakeCatalog whose first read of a table alone waits until release is closed.
+type pausingCatalog struct {
+	fakeCatalog
+	mu      sync.Mutex
+	paused  bool
+	reading chan struct{}
+	release chan struct{}
+}
+
+func (c *pausingCatalog) Catalog(ctx context.Context, database, table string) (*schema.Catalog, error) {
+	c.mu.Lock()
+	pause := table != "" && !c.paused
+	c.paused = c.paused || pause
+	cat, err := c.fakeCatalog.Catalog(ctx, database, table)
+	c.mu.Unlock()
+	if pause {
+		close(c.reading)
+		<-c.release
+	}
+	return cat, err
+}
+
+// TestATableIsCheckedBeforeItsFirstRowWhileThePreflightConfirmsItsProblem: the preflight has not set
+// the table aside yet, so a row of it must not bind unchecked.
+func TestATableIsCheckedBeforeItsFirstRowWhileThePreflightConfirmsItsProblem(t *testing.T) {
+	cfg := guardConfig(config.CascadesError)
+	e := &Engine{cfg: cfg, log: slog.New(slog.DiscardHandler)}
+	reader := &pausingCatalog{fakeCatalog: fakeCatalog{cat: cascadingCatalog()}, reading: make(chan struct{}), release: make(chan struct{})}
+	g := newTableGuard(reader, cfg, e.log)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.preflight(ctx, reader, g, &fakeQuarantiner{}, cancel)
+	}()
+	<-reader.reading
+
+	problem, err := g.CheckTable(ctx, "shop", "orders")
+	close(reader.release)
+	<-done
+
+	if err != nil || problem == nil {
+		t.Errorf("CheckTable() = (%v, %v) while the preflight confirms the cascade, want the cascade found", problem, err)
+	}
+}
+
+// TestATableSetAsideIsCheckedAgainBeforeItsNextRow: a released table goes back to quarantine while
+// the cause is there; a table without a problem is not read again.
+func TestATableSetAsideIsCheckedAgainBeforeItsNextRow(t *testing.T) {
+	cat := cascadingCatalog()
+	cat.Tables = append(cat.Tables, schema.CatalogTable{Database: "shop", Name: "users", Columns: []string{"id"}, PrimaryKey: []string{"id"}})
+	cfg := guardConfig(config.CascadesError)
+	e := &Engine{cfg: cfg, log: slog.New(slog.DiscardHandler)}
+	reader := &fakeCatalog{cat: cat}
+	g := newTableGuard(reader, cfg, e.log)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	e.preflight(ctx, reader, g, &fakeQuarantiner{}, cancel)
+
+	for range 2 {
+		if problem, err := g.CheckTable(ctx, "shop", "orders"); err != nil || problem == nil {
+			t.Errorf("CheckTable() = (%v, %v) of a table set aside, want the cascade found", problem, err)
+		}
+	}
+	reads := reader.calls
+	if problem, err := g.CheckTable(ctx, "shop", "users"); err != nil || problem != nil || reader.calls != reads {
+		t.Errorf("CheckTable() = (%v, %v), catalog reads %d, want a vetted table not read again", problem, err, reader.calls-reads)
 	}
 }

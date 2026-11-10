@@ -34,12 +34,19 @@ func newTableGuard(src catalogReader, cfg *config.Config, log *slog.Logger) *tab
 	return &tableGuard{src: src, cfg: cfg, log: log, checked: map[string]bool{}}
 }
 
-// markChecked records tables whose preflight report has been logged.
-func (g *tableGuard) markChecked(cat *schema.Catalog) {
+// markChecked records the tables of the catalog the report finds no problem of; a table with one is
+// checked again before every row until it is set aside.
+func (g *tableGuard) markChecked(cat *schema.Catalog, r *preflight.Report) {
+	problems := map[string]bool{}
+	for _, p := range r.TableProblems() {
+		problems[p.Table] = true
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, t := range cat.Tables {
-		g.checked[t.FullName()] = true
+		if !problems[t.FullName()] {
+			g.checked[t.FullName()] = true
+		}
 	}
 }
 
@@ -89,7 +96,7 @@ func (g *tableGuard) CheckTable(ctx context.Context, database, table string) (pr
 		}
 	}
 	report.LogProblems(g.log)
-	g.markChecked(cat)
+	g.markChecked(cat, report)
 
 	if err := report.ConfigErr(); err != nil {
 		return nil, err
@@ -106,8 +113,8 @@ func (g *tableGuard) CheckTable(ctx context.Context, database, table string) (pr
 
 // confirm reads every table the report finds a problem of again, alone, and keeps the problems the
 // second read shows too: a read of the whole catalog runs into the statements that change a table
-// meanwhile (an online migration). A table whose problem is gone is forgotten, so it is checked
-// again before its first row.
+// meanwhile (an online migration). A table whose problem is gone is not marked checked, so it is
+// checked again before its first row.
 func (g *tableGuard) confirm(ctx context.Context, r *preflight.Report) error {
 	var tables []string
 	for _, p := range r.TableProblems() {
@@ -128,9 +135,6 @@ func (g *tableGuard) confirm(ctx context.Context, r *preflight.Report) error {
 			g.log.Warn("preflight: table changed during check", "table", full)
 		default:
 			problems = alone.Problems
-		}
-		if problems == nil {
-			g.Forget(database, table)
 		}
 		r.ReplaceTable(full, problems)
 	}

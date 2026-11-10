@@ -197,7 +197,7 @@ journalctl -u binwave -f
 ```
 
 - `binwave replication status` — the state (`ready`/`paused`/`failed`), GTID position, lag, the number of tables and of quarantined ones;
-- `binwave tables list` — what went to quarantine and why; `release --accept-data-gap <db.table>` returns it as it is, `resync <db.table>` reads the table again (the service must be running);
+- `binwave tables list` — what went to quarantine and why; `release --accept-data-gap <db.table>` returns it as it is (a table without a key or with a cascading foreign key is checked again before its next row and goes back to quarantine while the cause is there), `resync <db.table>` reads the table again (the service must be running);
 - `curl 127.0.0.1:9187/status` — the same in JSON; row values never appear there (only on the control socket);
 - `curl 127.0.0.1:9187/metrics` — Prometheus; the key metrics at start: `binwave_lag_seconds`, `binwave_degraded`, `binwave_quarantined_tables`, `binwave_replication_failed`, `binwave_autoresync_total`/`binwave_autoresync_failed_total`; collection and the dashboard are below.
 
