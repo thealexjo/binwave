@@ -68,6 +68,8 @@ tar xzf binwave_${VERSION}_linux_$ARCH.tar.gz
 sudo install -m 0755 binwave /usr/local/bin/binwave
 ```
 
+The binary alone is published as well, `binwave_${VERSION}_linux_$ARCH`, for a download without unpacking.
+
 Where an archive or an image was built is attested by GitHub: `gh attestation verify binwave_${VERSION}_linux_$ARCH.tar.gz --repo thealexjo/binwave`, and `gh attestation verify oci://ghcr.io/thealexjo/binwave:$VERSION --repo thealexjo/binwave` for the image.
 
 ### From the source

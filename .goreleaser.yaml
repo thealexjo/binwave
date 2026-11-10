@@ -25,6 +25,10 @@ archives:
       - README.md
       - deploy/config.example.yaml
       - deploy/systemd/*.service
+  # The binary alone too, for a download without unpacking.
+  - id: binary
+    formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt
