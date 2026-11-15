@@ -28,6 +28,7 @@ const (
 	SRC105 Code = "SRC105" // enforce_gtid_consistency is not ON
 	SRC106 Code = "SRC106" // binlog_row_value_options contains PARTIAL_JSON
 	SRC107 Code = "SRC107" // log_bin is not ON
+	SRC108 Code = "SRC108" // binlog_order_commits is not ON on MySQL before 8.0.33
 	SRC201 Code = "SRC201" // unsupported MySQL version, or MariaDB
 	SRC301 Code = "SRC301" // a required privilege is missing (REPLICATION SLAVE/CLIENT, SELECT)
 	SRC401 Code = "SRC401" // the binlog position needed is already purged (error 1236)
@@ -61,6 +62,7 @@ const (
 	TBL204 Code = "TBL204" // every column of the table is excluded
 	TBL301 Code = "TBL301" // a foreign key has ON DELETE/UPDATE CASCADE, SET NULL or SET DEFAULT, which never reaches the binlog
 	TBL401 Code = "TBL401" // two source tables would be replicated into the same ClickHouse table, or one into the shadow table of a resync of the other
+	TBL501 Code = "TBL501" // the source server may write wrong values of a column into the binlog, by a known bug of its version
 )
 
 // DDL — schema changes read from the binlog and applied (or deliberately not applied) to ClickHouse.
@@ -132,9 +134,9 @@ const (
 
 // All lists every code, for TestEveryCodeIsDocumented to check against docs/reference/error-codes.md.
 var All = []Code{
-	SRC101, SRC102, SRC103, SRC104, SRC105, SRC106, SRC107, SRC201, SRC301, SRC401, SRC501, SRC502,
+	SRC101, SRC102, SRC103, SRC104, SRC105, SRC106, SRC107, SRC108, SRC201, SRC301, SRC401, SRC501, SRC502,
 	TGT101, TGT102, TGT201, TGT301, TGT302,
-	TBL101, TBL102, TBL103, TBL104, TBL105, TBL106, TBL201, TBL202, TBL203, TBL204, TBL301, TBL401,
+	TBL101, TBL102, TBL103, TBL104, TBL105, TBL106, TBL201, TBL202, TBL203, TBL204, TBL301, TBL401, TBL501,
 	DDL101, DDL102, DDL201, DDL202, DDL301, DDL401,
 	CONV101, CONV201,
 	REPL101, REPL102, REPL103,

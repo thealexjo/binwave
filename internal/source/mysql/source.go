@@ -75,6 +75,7 @@ type Source struct {
 	chunkStmts *stmtCache[*sql.Stmt]
 	streamTLS  *tls.Config
 	collations collations
+	version    serverVersion
 }
 
 // defaultSnapshotPoolSize is used when Options.SnapshotPoolSize is not set: enough for the default
@@ -174,9 +175,11 @@ func (s *Source) initialize(ctx context.Context, db *sql.DB, tlsCfg *tls.Config)
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("connect to source %s:%d: %w", s.cfg.Host, s.cfg.Port, err)
 	}
-	if err := CheckRequirements(ctx, db); err != nil {
+	version, err := checkRequirements(ctx, db)
+	if err != nil {
 		return err
 	}
+	s.version = version
 	if err := checkDatabases(ctx, db, s.cfg.User, s.opts.Databases); err != nil {
 		return err
 	}

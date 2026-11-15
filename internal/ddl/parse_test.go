@@ -256,6 +256,50 @@ func TestVersionedCommentsAndMixedCase(t *testing.T) {
 	}
 }
 
+// TestPerconaCompressedColumnsAreOrdinaryColumns: the binlog carries the values of a compressed
+// column of Percona Server uncompressed, so a statement with one reads as the same statement
+// without the compression.
+func TestPerconaCompressedColumnsAreOrdinaryColumns(t *testing.T) {
+	tests := []struct{ query, plain string }{
+		{"CREATE TABLE docs (id INT PRIMARY KEY, body BLOB COLUMN_FORMAT COMPRESSED)", "CREATE TABLE docs (id INT PRIMARY KEY, body BLOB)"},
+		{"CREATE TABLE docs (id INT PRIMARY KEY, body BLOB /*!50633 COLUMN_FORMAT COMPRESSED */)", "CREATE TABLE docs (id INT PRIMARY KEY, body BLOB)"},
+		{"ALTER TABLE docs ADD COLUMN note TEXT column_format compressed WITH COMPRESSION_DICTIONARY `shop dict`", "ALTER TABLE docs ADD COLUMN note TEXT"},
+		{"ALTER TABLE docs ADD COLUMN note TEXT /*!50633 COLUMN_FORMAT COMPRESSED WITH COMPRESSION_DICTIONARY `d` */ NOT NULL", "ALTER TABLE docs ADD COLUMN note TEXT NOT NULL"},
+		{"ALTER TABLE docs MODIFY body MEDIUMBLOB COLUMN_FORMAT /* the format */ COMPRESSED", "ALTER TABLE docs MODIFY body MEDIUMBLOB"},
+		{
+			"ALTER TABLE docs ADD COLUMN a JSON COLUMN_FORMAT COMPRESSED, ADD COLUMN b VARCHAR(40) DEFAULT 'COLUMN_FORMAT COMPRESSED' COMMENT 'it''s COLUMN_FORMAT COMPRESSED'",
+			"ALTER TABLE docs ADD COLUMN a JSON, ADD COLUMN b VARCHAR(40) DEFAULT 'COLUMN_FORMAT COMPRESSED' COMMENT 'it''s COLUMN_FORMAT COMPRESSED'",
+		},
+	}
+	for _, tt := range tests {
+		got, want := mustParse(t, tt.query), mustParse(t, tt.plain)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Parse(%q) = %#v, want %#v", tt.query, got, want)
+		}
+	}
+
+	for query, kind := range map[string]string{
+		"CREATE COMPRESSION_DICTIONARY shop_dict ('abcabc')":     "CREATE COMPRESSION_DICTIONARY",
+		"/* a note */ drop compression_dictionary IF EXISTS `d`": "DROP COMPRESSION_DICTIONARY",
+	} {
+		if got := mustParse(t, query); got != (Other{Kind: kind}) {
+			t.Errorf("Parse(%q) = %#v, want %s", query, got, kind)
+		}
+	}
+
+	// The words in a name or a string are not the attribute, and a statement still wrong without it stays an error.
+	for _, q := range []string{
+		"CREATE TABLE docs (`COLUMN_FORMAT COMPRESSED` INT, x BLOB COLUMN_FORMAT FIXED garbage)",
+		"ALTER TABLE docs ADD COLUMN c TEXT COLUMN_FORMAT COMPRESSED garbage",
+		"'CREATE COMPRESSION_DICTIONARY d'",
+	} {
+		var pe *ParseError
+		if _, err := Parse(q, "shop"); !errors.As(err, &pe) {
+			t.Errorf("Parse(%q) error = %v, want a *ParseError", q, err)
+		}
+	}
+}
+
 func TestUnparsableStatementsReturnAParseError(t *testing.T) {
 	for _, q := range []string{"", "ALTER TABLE", "this is not sql", "DROP TABLE"} {
 		_, err := Parse(q, "shop")
@@ -311,6 +355,7 @@ func FuzzParse(f *testing.F) {
 		"ALTER TABLE t DROP PARTITION p1",
 		"/*!80016 ALTER TABLE t ENGINE=InnoDB */",
 		"ALTER TABLE t CHANGE a b INT NOT NULL, RENAME COLUMN c TO d",
+		"ALTER TABLE t ADD COLUMN c TEXT /*!50633 COLUMN_FORMAT COMPRESSED WITH COMPRESSION_DICTIONARY `d` */ DEFAULT 'it''s'",
 		"",
 	} {
 		f.Add(seed)

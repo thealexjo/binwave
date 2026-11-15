@@ -23,6 +23,10 @@ type CatalogTable struct {
 	// hundred million rows from one of a hundred. The initial load reads the big ones first, so that
 	// the whole load is not left waiting for one table that started last (see Pipeline.tablesToLoad).
 	EstimatedRows int64
+	// UnreliableColumns are the columns whose values the source server may write wrongly into the
+	// binlog, by a known bug of its version: the compressed columns of a partitioned table on
+	// Percona Server before 8.0.35 (PS-7806).
+	UnreliableColumns []string
 }
 
 // FullName renders "database.table".

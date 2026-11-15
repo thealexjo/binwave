@@ -233,6 +233,9 @@ func CheckTable(t schema.CatalogTable, fks []schema.ForeignKey, cfg *config.Conf
 		if chsink.IsServiceColumn(c) {
 			add(SevError, ScopeTable, errcode.TBL201, "column %q collides with a binwave service column; exclude it or rename it in the source", c)
 		}
+		if slices.Contains(t.UnreliableColumns, c) {
+			add(SevError, ScopeTable, errcode.TBL501, "column %q may be written wrongly into the binlog (PS-7806); exclude it with tables.overrides.%s.exclude_columns", c, full)
+		}
 		if !chsink.Insertable(c) {
 			add(SevError, ScopeTable, errcode.TBL202, "column %q cannot be inserted by the ClickHouse client library (a name with a comma, a backtick or a double quote at either end); exclude it with tables.overrides.%s.exclude_columns", c, full)
 		}

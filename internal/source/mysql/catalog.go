@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
+
+	sqldriver "github.com/go-sql-driver/mysql"
 
 	"github.com/thealexjo/binwave/internal/schema"
 )
@@ -75,17 +78,22 @@ func (s *Source) Catalog(ctx context.Context, database, table string) (*schema.C
 	byName := map[key]*schema.CatalogTable{}
 	var order []key
 
-	err := s.query(ctx, s.db, "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND "+where, args,
+	var partitioned []key
+	err := s.query(ctx, s.db, "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_ROWS, CREATE_OPTIONS FROM information_schema.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND "+where, args,
 		func(rows *sql.Rows) error {
 			var db, tbl string
 			var estimate sql.NullInt64 // the server has no statistics for a table it never opened
-			if err := rows.Scan(&db, &tbl, &estimate); err != nil {
+			var options sql.NullString
+			if err := rows.Scan(&db, &tbl, &estimate, &options); err != nil {
 				return fmt.Errorf("scan: %w", err)
 			}
 			if include(db, tbl) {
 				k := key{db, tbl}
 				byName[k] = &schema.CatalogTable{Database: db, Name: tbl, EstimatedRows: estimate.Int64}
 				order = append(order, k)
+				if strings.Contains(strings.ToLower(options.String), "partitioned") {
+					partitioned = append(partitioned, k)
+				}
 			}
 			return nil
 		})
@@ -150,6 +158,15 @@ func (s *Source) Catalog(ctx context.Context, database, table string) (*schema.C
 		t := byName[ik.key]
 		t.UniqueKeys = append(t.UniqueKeys, *indexes[ik])
 	}
+	if s.version.less(compressedPartitionsFixed) {
+		for _, k := range partitioned {
+			cols, err := s.compressedColumnsOf(ctx, k.db, k.table)
+			if err != nil {
+				return nil, fmt.Errorf("read the definition of %s.%s: %w", k.db, k.table, err)
+			}
+			byName[k].UnreliableColumns = cols
+		}
+	}
 
 	cat := &schema.Catalog{}
 	sort.Slice(order, func(i, j int) bool {
@@ -178,6 +195,37 @@ func (s *Source) Catalog(ctx context.Context, database, table string) (*schema.C
 		return nil, fmt.Errorf("read source foreign keys: %w", err)
 	}
 	return cat, nil
+}
+
+// compressedPartitionsFixed is the first version whose Percona Server writes the compressed columns of
+// a partitioned table into the binlog correctly (PS-7806); MySQL itself has no compressed columns.
+var compressedPartitionsFixed = serverVersion{8, 0, 35}
+
+// reCompressedColumn finds a compressed column in the output of SHOW CREATE TABLE, which puts every
+// column on a line of its own.
+var reCompressedColumn = regexp.MustCompile("(?m)^\\s*`((?:[^`]|``)+)` [^\\n]*?/\\*!50633 COLUMN_FORMAT COMPRESSED")
+
+// compressedColumns returns the compressed columns of a table definition of SHOW CREATE TABLE.
+func compressedColumns(definition string) []string {
+	var cols []string
+	for _, m := range reCompressedColumn.FindAllStringSubmatch(definition, -1) {
+		cols = append(cols, strings.ReplaceAll(m[1], "``", "`"))
+	}
+	return cols
+}
+
+// compressedColumnsOf reads the compressed columns of a table; a table dropped meanwhile has none.
+func (s *Source) compressedColumnsOf(ctx context.Context, database, table string) ([]string, error) {
+	var name, definition string
+	err := s.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+quoteIdent(database)+"."+quoteIdent(table)).Scan(&name, &definition)
+	var myErr *sqldriver.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1146 { // ER_NO_SUCH_TABLE
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("show create table: %w", err)
+	}
+	return compressedColumns(definition), nil
 }
 
 // query runs a statement and calls each for every row.

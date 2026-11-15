@@ -281,14 +281,14 @@ func TestEngineReplicatesTimestampsAcrossZonesAndDST(t *testing.T) {
 	stop := runEngine(t, engineConfig(t, my, ch, "clickhouse"))
 
 	// Instants in UTC seconds: either side of the spring gap and the fall overlap in Chicago,
-	// the same for Kyiv, plus an epoch edge and a fractional value.
+	// the same for Berlin, plus an epoch edge and a fractional value.
 	instants := []int64{
 		1710054000, 1710057599, 1710057600, // 2024-03-10 around 08:00 UTC, when Chicago springs forward
 		1730620200, 1730623800, // 2024-11-03 06:30 and 07:30 UTC: the ambiguous hour in Chicago
-		1711846800, 1729990800, // Kyiv changes on 2024-03-31 and 2024-10-27
-		1, 2147483647,
+		1711846800, 1729990800, // Berlin changes on 2024-03-31 and 2024-10-27
+		21601, 2147483647, // the epoch edge: 00:00:01 in Chicago, the oldest wall clock MySQL 8.0 takes into a TIMESTAMP
 	}
-	zones := []string{"America/Chicago", "Europe/Kyiv", "+05:30", "UTC"}
+	zones := []string{"America/Chicago", "Europe/Berlin", "+05:30", "UTC"}
 	id := 0
 	for _, zone := range zones {
 		conn, err := my.DB.Conn(context.Background())

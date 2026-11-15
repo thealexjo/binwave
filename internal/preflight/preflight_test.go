@@ -120,6 +120,21 @@ func TestColumnChecks(t *testing.T) {
 	}
 }
 
+func TestColumnsTheSourceWritesWronglyAreRefusedUnlessExcluded(t *testing.T) {
+	tbl := table("shop", "docs", []string{"id"}, "id", "body", "note")
+	tbl.UnreliableColumns = []string{"body", "note"}
+	exclude := func(c *config.Config) {
+		c.Tables.Overrides = map[string]config.TableOverride{"shop.docs": {ExcludeColumns: []string{"note"}}}
+	}
+
+	got := CheckTable(tbl, nil, cfgWith(t, exclude))
+
+	wantProblems(t, got, `error: shop.docs: column "body" may be written wrongly into the binlog`)
+	if got[0].Code != "TBL501" || got[0].Scope != ScopeTable {
+		t.Errorf("problem = %+v, want a TBL501 problem of the table", got[0])
+	}
+}
+
 func TestForeignKeyCascadesFollowThePolicy(t *testing.T) {
 	tbl := table("shop", "orders", []string{"id"}, "id", "user_id")
 	fks := []schema.ForeignKey{

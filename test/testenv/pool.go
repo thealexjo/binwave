@@ -16,6 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcclickhouse "github.com/testcontainers/testcontainers-go/modules/clickhouse"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // Starting a database container takes seconds and stopping one takes seconds more, which added up
@@ -134,6 +135,8 @@ func startMySQLServer(key string, extra []string) (*mysqlServer, error) {
 		tcmysql.WithPassword(password),
 		tcmysql.WithDatabase(database),
 		testcontainers.WithCmdArgs(args...),
+		// Ready once the server listens on its port, whichever edition it is (MySQL or Percona Server).
+		testcontainers.WithWaitStrategy(wait.ForLog("port: 3306  ")),
 	)
 	if err != nil {
 		terminateFast(ctr)

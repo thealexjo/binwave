@@ -6,7 +6,7 @@ A step-by-step guide to installing binwave on a server and replicating from MySQ
 
 - A server for binwave: one static binary or Docker, with no special resource requirements (buffers are limited by the config, the `buffer` section).
 - Network access from this server to the MySQL source (usually 3306) and to ClickHouse (usually 9000/9440).
-- MySQL 8.0.36+ (the 8.0 line) or 8.4 LTS. The service does not accept other versions — exit code 78 at start.
+- MySQL 8.0.23+ (the 8.0 line, except the withdrawn 8.0.29) or 8.4 LTS. The service does not accept other versions — exit code 78 at start.
 - ClickHouse 25.8 or 26.8.
 
 ## 1. Source: checking the requirements
@@ -22,8 +22,9 @@ SHOW VARIABLES LIKE 'binlog_row_metadata';         -- FULL
 SHOW VARIABLES LIKE 'gtid_mode';                   -- ON
 SHOW VARIABLES LIKE 'enforce_gtid_consistency';    -- ON
 SHOW VARIABLES LIKE 'binlog_row_value_options';    -- empty (no PARTIAL_JSON)
+SHOW VARIABLES LIKE 'binlog_order_commits';        -- ON, on 8.0 below 8.0.33
 SHOW VARIABLES LIKE 'server_id';                   -- unique among all replicas of the source
-SELECT VERSION();                                  -- 8.0.36+ or 8.4.x
+SELECT VERSION();                                  -- 8.0.23+ (not 8.0.29) or 8.4.x
 ```
 
 The exact list of what the service itself checks at start is `internal/source/mysql/requirements.go`; on a mismatch the service does not start and names what is missing (exit code 78).

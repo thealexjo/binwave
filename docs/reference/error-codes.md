@@ -19,7 +19,8 @@ The requirements are checked at start (`internal/source/mysql/requirements.go`).
 | `SRC105` | `enforce_gtid_consistency` is not `ON` | enable it |
 | `SRC106` | `binlog_row_value_options` contains `PARTIAL_JSON` | remove `PARTIAL_JSON` — otherwise the binlog carries JSON diffs instead of values |
 | `SRC107` | `log_bin` is not `ON` | enable the binlog on the source itself (for a replica this is not the same as replication from the primary, see `docs/deployment.md`) |
-| `SRC201` | unsupported MySQL version or MariaDB | MySQL 8.0.36+ (the 8.0 line) or 8.4 LTS is required |
+| `SRC108` | `binlog_order_commits` is not `ON` on MySQL before 8.0.33 | set `binlog_order_commits=ON` (the default): before 8.0.33 unordered commits can leave a transaction out of the GTID set of the next binary log, and a reconnect would skip it |
+| `SRC201` | unsupported MySQL version or MariaDB | MySQL 8.0.23+ (the 8.0 line, except the withdrawn 8.0.29) or 8.4 LTS is required |
 | `SRC301` | `REPLICATION SLAVE`/`REPLICATION CLIENT`/`SELECT` is missing | grant the privileges to the binwave user |
 | `SRC401` | the required binlog position is already purged (error 1236) | a resync from scratch (`initial_position`) or a longer `binlog_expire_logs_seconds` on the source is needed |
 | `SRC501` | the source has been silent for longer than three heartbeat periods | network or a hung server — check the source; the process restarts by itself |
@@ -53,6 +54,7 @@ They lead to a quarantine (`tables.on_replication_error: quarantine`, the defaul
 | `TBL204` | all columns are excluded | — (configuration error) | fix `exclude_columns` |
 | `TBL301` | a foreign key with `ON DELETE`/`ON UPDATE CASCADE`/`SET NULL`/`SET DEFAULT` | no | set `tables.foreign_key_cascades: warn` deliberately, or remove the cascade in the source |
 | `TBL401` | two source tables point to one ClickHouse table, or one to the shadow table (`<table>__resync`) of the other | — (configuration error) | separate them with `tables.overrides.<t>.target_table` or `tables.database_map` |
+| `TBL501` | the source server may write wrong values of the column into the binlog, by a known bug of its version: a `COLUMN_FORMAT COMPRESSED` column of a partitioned table on Percona Server before 8.0.35 (PS-7806: a statement that reads the table in index order across partitions, such as a `DELETE`) | no | upgrade the source to Percona Server 8.0.35-27 or newer, remove the compression (`MODIFY ... COLUMN_FORMAT DEFAULT`) or exclude the column (`exclude_columns`); then `binwave tables resync` |
 
 ## `DDL` — schema changes in the stream
 

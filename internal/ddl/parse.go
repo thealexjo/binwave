@@ -38,7 +38,16 @@ func Parse(query, defaultDB string) (op Op, err error) {
 
 	stmt, err := p.ParseOneStmt(query, "", "")
 	if err != nil {
-		return nil, &ParseError{Query: query, Err: err}
+		if kind, ok := compressionDictionary(query); ok {
+			return Other{Kind: kind}, nil
+		}
+		plain, ok := withoutCompression(query)
+		if !ok {
+			return nil, &ParseError{Query: query, Err: err}
+		}
+		if stmt, err = p.ParseOneStmt(plain, "", ""); err != nil {
+			return nil, &ParseError{Query: query, Err: err}
+		}
 	}
 	q := qualifier{db: defaultDB}
 

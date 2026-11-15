@@ -59,11 +59,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # MySQL: only the 8.4 LTS is verified for now, to keep CI fast. 8.0.36 and newer 8.0 releases
-        # are accepted by the startup check but are not covered by the tests.
+        # MySQL 8.4 with every ClickHouse LTS; the lowest supported 8.0 and Percona Server with the newest.
         mysql: ["mysql:8.4"]
-        # ClickHouse: the flagship LTS releases.
         clickhouse: ["clickhouse/clickhouse-server:25.8", "clickhouse/clickhouse-server:26.8"]
+        include:
+          - {mysql: "mysql:8.0.23", clickhouse: "clickhouse/clickhouse-server:26.8"}
+          - {mysql: "percona:ps-8.0.28-20", clickhouse: "clickhouse/clickhouse-server:26.8"}
     name: integration (${{ matrix.mysql }}, ${{ matrix.clickhouse }})
     env:
       BINWAVE_TEST_MYSQL_IMAGE: ${{ matrix.mysql }}
