@@ -380,8 +380,10 @@ func TestCheckConnectPassesForAHealthySource(t *testing.T) {
 	if err := engine.New(engineConfig(t, my, ch, "file"), quietLogger()).Check(context.Background(), &out); err != nil {
 		t.Fatalf("Check() = %v\n%s", err, out.String())
 	}
-	if !strings.Contains(out.String(), "Tables     ok") {
-		t.Errorf("report:\n%s", out.String())
+	for _, want := range []string{"Position   ok", "Tables     ok"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the report lacks %q:\n%s", want, out.String())
+		}
 	}
 }
 

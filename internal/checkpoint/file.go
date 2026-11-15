@@ -58,6 +58,23 @@ type File struct {
 // NewFile creates a store backed by the file at path.
 func NewFile(path string) *File { return &File{path: path} }
 
+// CheckWritable makes sure that a position can be saved: a file is created in the directory of the
+// store and removed. Nothing else is written there until the first save, after both databases are
+// reached, so a directory the service cannot write to would be found late.
+func (f *File) CheckWritable() error {
+	dir := filepath.Dir(f.path)
+	tmp, err := os.CreateTemp(dir, ".checkpoint-*")
+	if err != nil {
+		return fmt.Errorf("the position cannot be saved in %s: %w", dir, err)
+	}
+	name := tmp.Name()
+	_ = tmp.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("the position cannot be saved in %s: %w", dir, err)
+	}
+	return nil
+}
+
 // Load returns the saved position. found is false when nothing has been saved yet. A damaged
 // file is an error: starting from "now" instead would silently skip data.
 func (f *File) Load(_ context.Context) (pos Position, found bool, err error) {

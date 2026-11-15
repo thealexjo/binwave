@@ -255,3 +255,19 @@ func TestStartupFailuresAreVisibleInTheStatus(t *testing.T) {
 		t.Errorf("last error = %+v, want the failed start attempt", st.LastError)
 	}
 }
+
+// TestRunStopsAtOnceWhenThePositionCannotBeSaved: the file store is checked before any database is
+// reached, and a directory the service cannot write to is a mistake of the configuration.
+func TestRunStopsAtOnceWhenThePositionCannotBeSaved(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Control.Socket = config.DefaultControlSocket
+	cfg.Checkpoint = config.Checkpoint{Store: config.CheckpointFile, FilePath: t.TempDir() + "/no/such/dir/checkpoint.json"}
+	e := New(cfg, slog.New(slog.DiscardHandler))
+
+	err := e.Run(context.Background(), app.Hooks{})
+
+	var cfgErr *app.ConfigError
+	if !errors.As(err, &cfgErr) || !strings.Contains(err.Error(), "checkpoint.file_path") {
+		t.Fatalf("Run() = %v, want a ConfigError about checkpoint.file_path", err)
+	}
+}

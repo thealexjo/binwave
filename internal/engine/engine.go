@@ -93,7 +93,21 @@ func (e *Engine) Run(ctx context.Context, hooks app.Hooks) error {
 		return err
 	}
 	defer stop()
+	if err := checkPositionStore(e.cfg.Checkpoint); err != nil {
+		return err
+	}
 	return e.retryStartup(ctx, hooks, e.run)
+}
+
+// checkPositionStore makes sure, before anything is reached, that the file store can save a position.
+func checkPositionStore(cp config.Checkpoint) error {
+	if cp.Store != config.CheckpointFile {
+		return nil
+	}
+	if err := checkpoint.NewFile(cp.FilePath).CheckWritable(); err != nil {
+		return &app.ConfigError{Err: fmt.Errorf("checkpoint.file_path %s: %w", cp.FilePath, err)}
+	}
+	return nil
 }
 
 // run is one attempt: it opens everything and replicates until it fails or ctx is cancelled.

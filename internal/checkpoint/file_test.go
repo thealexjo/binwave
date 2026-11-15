@@ -112,6 +112,35 @@ func TestFileSaveFailsInAMissingDirectory(t *testing.T) {
 	}
 }
 
+func TestFileCheckWritableLeavesNothingBehind(t *testing.T) {
+	dir := t.TempDir()
+	if err := NewFile(filepath.Join(dir, "checkpoint.json")).CheckWritable(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("the directory holds %v (%v), want nothing", entries, err)
+	}
+}
+
+func TestFileCheckWritableFailsWhereNothingCanBeSaved(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	readOnly := t.TempDir()
+	if err := os.Chmod(readOnly, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readOnly, 0o700) })
+	for _, path := range []string{
+		filepath.Join(readOnly, "checkpoint.json"),
+		filepath.Join(t.TempDir(), "no", "such", "dir", "checkpoint.json"),
+	} {
+		if err := NewFile(path).CheckWritable(); err == nil {
+			t.Errorf("CheckWritable(%s) succeeded", path)
+		}
+	}
+}
+
 func TestFileFailedSaveKeepsThePreviousPosition(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

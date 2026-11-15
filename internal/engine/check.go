@@ -45,6 +45,13 @@ func (e *Engine) Check(ctx context.Context, out io.Writer) error {
 		return classify(err)
 	}
 	fmt.Fprintf(out, "ClickHouse ok      %v, privileges granted\n", cfg.Target.ClickHouse.Addresses)
+	if cfg.Checkpoint.Store == config.CheckpointFile {
+		if err := checkPositionStore(cfg.Checkpoint); err != nil {
+			fmt.Fprintf(out, "Position   %s  %v\n", failed, err)
+			return err
+		}
+		fmt.Fprintf(out, "Position   ok      %s can be saved\n", cfg.Checkpoint.FilePath)
+	}
 
 	cat, err := src.Catalog(ctx, "", "")
 	if err != nil {

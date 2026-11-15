@@ -225,7 +225,7 @@ as_service() { systemd-run --quiet --pipe --wait --collect --uid=binwave --gid=b
   -p EnvironmentFile=/etc/binwave/config.env -p StateDirectory=binwave /usr/local/bin/binwave "$@"; }
 
 as_service check --print     # config validation, secrets masked
-as_service check --connect   # + connections, source requirements, privileges, table checks
+as_service check --connect   # + connections, source requirements, privileges, the state directory (file store), table checks
 ```
 
 For an instance of the template, the file is `/etc/binwave/<instance>.env` and the commands take `--config /etc/binwave/<instance>.yaml`. With Option B, they run in a one-off container of the service, with its config, volume and environment: `docker compose run --rm binwave-main check --connect` for the compose example.
