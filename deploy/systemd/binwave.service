@@ -5,6 +5,7 @@
 #   install -m 0755 bin/binwave /usr/local/bin/binwave
 #   install -m 0644 deploy/systemd/binwave.service /etc/systemd/system/
 #   install -m 0640 -o root -g binwave config.yaml /etc/binwave/config.yaml
+#   install -m 0600 -o root -g root config.env /etc/binwave/config.env   # NAME=value lines: the passwords
 #   systemctl enable --now binwave
 #
 # Requires a system user: useradd --system --no-create-home --shell /usr/sbin/nologin binwave
@@ -28,9 +29,10 @@ TimeoutStartSec=15min
 
 User=binwave
 Group=binwave
+# The variables the config refers to as ${NAME}, such as the passwords.
+EnvironmentFile=-/etc/binwave/config.env
 # No --config: binwave defaults to /etc/binwave/config.yaml.
 ExecStart=/usr/local/bin/binwave run
-ExecReload=/bin/kill -HUP $MAINPID
 
 # SIGTERM → flush buffers and commit the checkpoint; give it time before SIGKILL.
 KillSignal=SIGTERM
