@@ -341,6 +341,7 @@ func (h *Hub) Stopping() { h.setState(StateStopping) }
 
 // Paused marks replication as paused: the service is up and reads nothing.
 func (h *Hub) Paused() {
+	h.resolve("") // a request cut short by the pause is not failing any more
 	h.mu.Lock()
 	if h.state != StatePaused {
 		h.pausedSince = h.now()
@@ -353,6 +354,7 @@ func (h *Hub) Paused() {
 // Failed marks replication as failed: the service is up and reads nothing until the operator
 // resumes it. f is kept whole; the metrics port serves it redacted.
 func (h *Hub) Failed(f failure.Failure) {
+	h.resolve("") // the failure is what the retries ended in; f describes it
 	h.mu.Lock()
 	h.pausedSince = h.now()
 	h.state = StateFailed

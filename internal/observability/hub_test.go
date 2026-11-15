@@ -271,6 +271,29 @@ func TestAnUnknownPositionAgeHasNoValue(t *testing.T) {
 	}
 }
 
+// TestAPauseOrFailureEndsTheErrorInProgress: a retry cut short by a pause, or turned into a failure,
+// never succeeds, and a stopped service must not claim a request is still failing.
+func TestAPauseOrFailureEndsTheErrorInProgress(t *testing.T) {
+	for name, stop := range map[string]func(*Hub){
+		"pause":   (*Hub).Paused,
+		"failure": func(h *Hub) { h.Failed(failure.Failure{Time: t0, GTID: "u:5", Kind: failure.KindRows}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, c := newTestHub()
+			h.Ready()
+			h.Retry("insert", "transient", errors.New("connection reset"))
+			c.Advance(time.Second)
+
+			stop(h)
+
+			e := h.Status().LastError
+			if e == nil || e.Ongoing || e.ResolvedAt == nil || !e.ResolvedAt.Equal(c.Now()) || e.Message != "connection reset" {
+				t.Errorf("last error = %+v, want it kept and ended at the stop", e)
+			}
+		})
+	}
+}
+
 func TestLastErrorIsBoundedAndKeepsValidUTF8(t *testing.T) {
 	h, _ := newTestHub()
 	h.RecordError("startup", errors.New(strings.Repeat("я", 400)))
