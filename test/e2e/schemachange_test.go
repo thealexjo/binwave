@@ -135,10 +135,11 @@ func TestPrimaryKeyChangeUnderLoadAndKillNine(t *testing.T) {
 		t.Fatalf("only %d kills; the scenario proved little", kills)
 	}
 	// The key is (id, owner) now, so an id can be there more than once: order by both, the owner as
-	// bytes because ClickHouse compares strings that way and MySQL by collation.
+	// bytes because ClickHouse compares strings that way and MySQL by collation; SET_VAR gives the
+	// sort a buffer these rows fit in.
 	byBoth := comparison{
 		name:  "acct",
-		mysql: "SELECT id, owner, qty, CAST(balance AS CHAR), note, CAST(updated_at AS CHAR) FROM binwave.acct ORDER BY id, BINARY owner",
+		mysql: "SELECT /*+ SET_VAR(sort_buffer_size = 8388608) */ id, owner, qty, CAST(balance AS CHAR), note, CAST(updated_at AS CHAR) FROM binwave.acct ORDER BY id, BINARY owner",
 		ch:    "SELECT id, owner, qty, toDecimalString(balance, 2), note, toString(updated_at) FROM replica.acct FINAL ORDER BY id, owner",
 	}
 	s.waitConverged(3*time.Minute, p, byBoth)
