@@ -277,6 +277,9 @@ func startBinwave(t *testing.T, cfgPath string) *proc {
 			_ = p.cmd.Process.Kill()
 			<-p.done
 		}
+		if strings.Contains(p.out.String(), "WARNING: DATA RACE") {
+			t.Error("the race detector found a data race in binwave")
+		}
 		if t.Failed() {
 			state := fmt.Sprintf("exited with code %d", p.exit)
 			if running {

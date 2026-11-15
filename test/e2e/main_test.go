@@ -27,9 +27,13 @@ func TestMain(m *testing.M) {
 
 	_, file, _, _ := runtime.Caller(0)
 	root := filepath.Join(filepath.Dir(file), "..", "..")
-	build := exec.Command("go", "build", "-o", binaryPath, "./cmd/binwave")
+	args, cgo := []string{"build", "-o", binaryPath}, "CGO_ENABLED=0"
+	if raceEnabled {
+		args, cgo = append(args, "-race"), "CGO_ENABLED=1"
+	}
+	build := exec.Command("go", append(args, "./cmd/binwave")...)
 	build.Dir = root
-	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	build.Env = append(os.Environ(), cgo)
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build binwave: %v\n%s", err, out)
 		_ = os.RemoveAll(dir)
