@@ -161,6 +161,8 @@ func (c *Client) Ensure(ctx context.Context, t *Table, ddl DDL) error {
 		if err != nil {
 			return fmt.Errorf("create table %s: %w", t.FullName(), err)
 		}
+	} else if err := c.notAnotherJobs(ctx, t); err != nil {
+		return err
 	}
 	if err := c.verify(ctx, t); err != nil {
 		return err
@@ -201,6 +203,23 @@ func (c *Client) recordTypes(ctx context.Context, t *Table) error {
 		// Only a later change of the type is harder to judge without them: not a reason to stop.
 		c.log.Warn("source types not saved in column comments",
 			"table", t.FullName(), "error", err)
+	}
+	return nil
+}
+
+// notAnotherJobs refuses an existing table that has the marker of a table binwave keeps for a job (the
+// copy of a rebuild, the shadow table of a resync) when it is not prepared for that job: its shape is
+// the shape of a source table of its name, and rows written to it would mix with the copy.
+func (c *Client) notAnotherJobs(ctx context.Context, t *Table) error {
+	comment, _, err := c.tableComment(ctx, t.Database, t.Name)
+	if err != nil {
+		return err
+	}
+	if (comment == RebuildMarker || comment == ResyncMarker) && comment != t.Comment {
+		return &TableError{Table: t.Source.FullName(), Err: fmt.Errorf(
+			"clickhouse table %s has the comment %q: it is a table binwave keeps for another job, and %s is not written to it; "+
+				"drop it in ClickHouse if that job is over, or give the table another name with tables.overrides.<database.table>.target_table",
+			t.FullName(), comment, t.Source.FullName())}
 	}
 	return nil
 }

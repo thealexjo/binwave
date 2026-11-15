@@ -86,6 +86,45 @@ func TestEnsureNeverTouchesAnExistingTable(t *testing.T) {
 	}
 }
 
+// TestEnsureNeverTakesATableBinwaveKeepsForAnotherJob: a copy a failed rebuild left, or the shadow
+// table of a resync, has the shape of a source table of its name, but it is binwave's for that job:
+// a source table created later under that name is refused, and the copy keeps its rows.
+func TestEnsureNeverTakesATableBinwaveKeepsForAnotherJob(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	sink := openSink(t, ch)
+	ctx := context.Background()
+	for _, marker := range []string{chsink.RebuildMarker, chsink.ResyncMarker} {
+		copied := resolveTable(t, kvTable(), nil)
+		copied.Name = "kv__copy"
+		if err := sink.Ensure(ctx, copied, additive); err != nil {
+			t.Fatal(err)
+		}
+		insertKV(t, sink, copied, kvRows(event.Insert, nil, []any{int32(1), "copied"}), 10)
+		execCH(t, ch, "ALTER TABLE replica.kv__copy MODIFY COMMENT '"+marker+"'")
+
+		src := kvTable()
+		src.Name = "kv__copy"
+		err := sink.Ensure(ctx, resolveTable(t, src, nil), additive)
+		if !chsink.IsTableProblem(err) || !strings.Contains(err.Error(), "kv__copy") {
+			t.Errorf("%s: Ensure() = %v, want a table problem that names the table", marker, err)
+		}
+		if rows := readTable(t, ch, "kv__copy", "k"); len(rows) != 1 || rows[0]["v"] != "copied" {
+			t.Errorf("%s: the copy changed: %v", marker, rows)
+		}
+		execCH(t, ch, "DROP TABLE replica.kv__copy")
+	}
+
+	// The shadow table of a resync is prepared again after a restart, with its own marker.
+	shadow := resolveTable(t, kvTable(), nil)
+	shadow.Name, shadow.Comment = "kv__resync", chsink.ResyncMarker
+	for i := range 2 {
+		if err := sink.Ensure(ctx, shadow, additive); err != nil {
+			t.Fatalf("Ensure() of the shadow table, call %d: %v", i+1, err)
+		}
+	}
+}
+
 func TestEnsureReportsAMismatchAndLeavesTheTableAlone(t *testing.T) {
 	t.Parallel()
 	ch := testenv.StartClickHouse(t)
