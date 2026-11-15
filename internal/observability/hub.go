@@ -198,7 +198,7 @@ func NewHub(opts Options) *Hub {
 			"A quiet source shows 0, not the time since its last change.", func() float64 { return h.snapshot().lag.Seconds() }),
 		fn("quarantined_tables", "Tables that are not being replicated because they cannot be: each is logged, listed in /status and stays behind the source until it is resynchronized and released.",
 			func() float64 { return float64(len(h.snapshot().quarantined)) }),
-		fn("paused", "1 while replication is paused: the service is up and reads nothing. The lag then counts the time since the pause began.", func() float64 {
+		fn("paused", "1 while replication is paused: the service is up and reads nothing. The lag then grows from where it stood when the pause began.", func() float64 {
 			if h.snapshot().state == StatePaused {
 				return 1
 			}
@@ -296,9 +296,9 @@ func (h *Hub) snapshot() snapshot {
 	}
 	if h.state == StatePaused || h.state == StateFailed {
 		// Nothing is read, so how far behind the source really is cannot be known; it is at
-		// least as much as the pause has lasted on a source that keeps changing, which is what
-		// the lag shows. A paused service must not look caught up.
-		lag, idle = now.Sub(h.pausedSince), false
+		// least the backlog it stopped with, grown by the pause, and at least as much as the pause
+		// has lasted on a source that keeps changing. A paused service must not look caught up.
+		lag, idle = max(lag, now.Sub(h.pausedSince)), false
 	}
 	return snapshot{
 		now: now, state: state, started: h.started, lastProgress: h.lastProgress, degradedFor: degradedFor,

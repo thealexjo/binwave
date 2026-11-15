@@ -354,6 +354,28 @@ func TestPausedServiceIsUpNotReadyAndItsLagGrows(t *testing.T) {
 	}
 }
 
+// TestAPauseOrFailureWithABacklogKeepsItsLag: a service an hour behind is still an hour behind when it
+// stops reading, and further behind the longer it stays stopped.
+func TestAPauseOrFailureWithABacklogKeepsItsLag(t *testing.T) {
+	for name, stop := range map[string]func(*Hub){
+		"pause":   (*Hub).Paused,
+		"failure": func(h *Hub) { h.Failed(failure.Failure{Time: t0, GTID: "u:5", Kind: failure.KindRows}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, c := newTestHub()
+			h.Ready()
+			h.TransactionBegan(c.Now().Add(-time.Hour))
+
+			stop(h)
+			c.Advance(30 * time.Second)
+
+			if got := value(t, scrape(t, h), "binwave_lag_seconds"); got != "3630" {
+				t.Errorf("lag = %s, want 3630: the backlog before the stop plus its duration", got)
+			}
+		})
+	}
+}
+
 func TestFailedServiceIsUpNotReadyAndTheMetricsPortHidesTheKey(t *testing.T) {
 	h, c := newTestHub()
 	h.Ready()
