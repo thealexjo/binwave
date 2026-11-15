@@ -28,7 +28,7 @@ func TestClassify(t *testing.T) {
 		{"drop schema", "drop schema if exists `shop`", "DROP DATABASE", nil, false},
 		{"drop partition", "ALTER TABLE orders DROP PARTITION p2023", "partition operation", []string{"shop.orders"}, false},
 		{"truncate partition", "ALTER TABLE `shop`.`orders` TRUNCATE PARTITION p1, p2", "partition operation", []string{"shop.orders"}, false},
-		{"exchange partition", "alter table orders exchange partition p1 with table staging", "partition operation", []string{"shop.orders"}, false},
+		{"exchange partition", "alter table orders exchange partition p1 with table store", "partition operation", []string{"shop.orders"}, false},
 		{"multi line", "ALTER TABLE orders\n  DROP PARTITION p1", "partition operation", []string{"shop.orders"}, false},
 		{"unparseable name is treated as any", "DROP TABLE weird!name", "DROP TABLE", nil, true},
 		// The parser rejects these, so the keyword scan still has to see them.
