@@ -32,6 +32,8 @@ type stream struct {
 	executed gomysql.GTIDSet
 	// pending is the GTID of the open transaction; empty when none is open.
 	pending string
+	// explicit is true when the open transaction began with BEGIN, so its XID ends it.
+	explicit bool
 }
 
 func newStream(from string, cs collations, include func(string, string) bool, handle Handler, log *slog.Logger) (*stream, error) {
@@ -91,6 +93,7 @@ func (s *stream) begin(ctx context.Context, e *replication.GTIDEvent) error {
 	// The same GTID while it is still open is a redelivery: after a reconnect in the middle of a
 	// transaction the library sends it again from its first event. The transaction starts over.
 	s.pending = next.String()
+	s.explicit = false
 
 	commitTime := e.OriginalCommitTime()
 	if commitTime.IsZero() {
@@ -107,13 +110,17 @@ func (s *stream) commit(ctx context.Context) error {
 		return fmt.Errorf("add %s to the executed GTID set: %w", s.pending, err)
 	}
 	s.pending = ""
+	s.explicit = false
 	return s.handle(ctx, event.Commit{GTIDSet: s.executed.String()})
 }
 
 func (s *stream) query(ctx context.Context, e *replication.QueryEvent, at time.Time) error {
 	q := strings.TrimSpace(string(e.Query))
 	switch word := strings.ToUpper(firstWord(q)); word {
-	case "BEGIN", "SAVEPOINT", "RELEASE":
+	case "BEGIN":
+		s.explicit = true
+		return nil
+	case "SAVEPOINT", "RELEASE":
 		return nil
 	case "COMMIT", "ROLLBACK":
 		// A rollback is logged only when non-transactional changes stay; the GTID is consumed either way.
@@ -130,6 +137,9 @@ func (s *stream) query(ctx context.Context, e *replication.QueryEvent, at time.T
 	}
 	if err := s.handle(ctx, event.DDL{Database: string(e.Schema), Query: q, Time: at}); err != nil {
 		return err
+	}
+	if s.explicit {
+		return nil // CREATE TABLE ... SELECT: the rows follow, and the XID ends the transaction
 	}
 	// DDL commits implicitly and the binlog carries no XID for it.
 	return s.commit(ctx)

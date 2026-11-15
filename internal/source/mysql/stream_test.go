@@ -189,6 +189,36 @@ func TestDDLIsATransactionOfItsOwn(t *testing.T) {
 	}
 }
 
+// TestCreateTableSelectIsOneTransactionWithItsRows: with row-based logging MySQL writes
+// CREATE TABLE ... SELECT as BEGIN, the CREATE TABLE (START TRANSACTION) statement, the rows, and
+// XID; the statement does not commit, the XID does.
+func TestCreateTableSelectIsOneTransactionWithItsRows(t *testing.T) {
+	tm := ordersMap(42)
+	got, err := collect(t, "", nil,
+		gtidEv(1),
+		queryEv("BEGIN"),
+		queryEv("CREATE TABLE `shop`.`t` (`id` bigint unsigned NOT NULL, `name` varchar(40) DEFAULT NULL, PRIMARY KEY (`id`)) START TRANSACTION"),
+		rowsEv(replication.WRITE_ROWS_EVENTv2, tm, []any{uint64(1), "a"}, []any{uint64(2), "b"}),
+		xidEv(),
+		gtidEv(2),
+		queryEv("ALTER TABLE t ADD COLUMN x INT"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Begin", "DDL", "Rows", "Commit", "Begin", "DDL", "Commit"}
+	var kinds []string
+	for _, ev := range got {
+		kinds = append(kinds, reflect.TypeOf(ev).Name())
+	}
+	if !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("events = %v, want %v", kinds, want)
+	}
+	if c := got[3].(event.Commit); c.GTIDSet != testUUID+":1" {
+		t.Errorf("commit set = %q", c.GTIDSet)
+	}
+}
+
 func TestQueryCommitAndRollbackEndTheTransaction(t *testing.T) {
 	// Non-transactional engines end with a COMMIT statement instead of an XID; a rolled-back
 	// transaction that touched them ends with ROLLBACK. Both consume the GTID.

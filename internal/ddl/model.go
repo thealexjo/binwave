@@ -21,8 +21,6 @@ type CreateTable struct {
 	Like        *Name
 	IfNotExists bool
 	Temporary   bool
-	// FromSelect is CREATE TABLE ... SELECT: the table gets rows without row events.
-	FromSelect bool
 }
 
 // DropTable is DROP TABLE.

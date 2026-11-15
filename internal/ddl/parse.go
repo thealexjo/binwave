@@ -2,6 +2,7 @@ package ddl
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -36,12 +37,13 @@ func Parse(query, defaultDB string) (op Op, err error) {
 		}
 	}()
 
-	stmt, err := p.ParseOneStmt(query, "", "")
+	text := withoutStartTransaction(query)
+	stmt, err := p.ParseOneStmt(text, "", "")
 	if err != nil {
-		if kind, ok := compressionDictionary(query); ok {
+		if kind, ok := compressionDictionary(text); ok {
 			return Other{Kind: kind}, nil
 		}
-		plain, ok := withoutCompression(query)
+		plain, ok := withoutCompression(text)
 		if !ok {
 			return nil, &ParseError{Query: query, Err: err}
 		}
@@ -53,7 +55,7 @@ func Parse(query, defaultDB string) (op Op, err error) {
 
 	switch s := stmt.(type) {
 	case *ast.CreateTableStmt:
-		op := CreateTable{Table: q.name(s.Table), IfNotExists: s.IfNotExists, Temporary: s.TemporaryKeyword != ast.TemporaryNone, FromSelect: s.Select != nil}
+		op := CreateTable{Table: q.name(s.Table), IfNotExists: s.IfNotExists, Temporary: s.TemporaryKeyword != ast.TemporaryNone}
 		if s.ReferTable != nil {
 			like := q.name(s.ReferTable)
 			op.Like = &like
@@ -299,4 +301,17 @@ func dataType(ft *types.FieldType) DataType {
 		t.Fsp = 0 // no fractional seconds unless the statement asks for them
 	}
 	return t
+}
+
+// reStartTransaction is the end of CREATE TABLE ... SELECT as row-based logging writes it.
+var reStartTransaction = regexp.MustCompile(`(?i)^\s*CREATE\b[\s\S]*\)\s*(START\s+TRANSACTION\s*;?\s*)$`)
+
+// withoutStartTransaction returns the statement without the START TRANSACTION clause of CREATE
+// TABLE ... SELECT, which the parser does not know; any other statement is returned as it is.
+func withoutStartTransaction(query string) string {
+	m := reStartTransaction.FindStringSubmatchIndex(mask(query))
+	if m == nil {
+		return query
+	}
+	return query[:m[2]]
 }

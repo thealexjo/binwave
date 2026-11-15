@@ -151,3 +151,23 @@ func TestDropDatabaseOfARealServerDropsTheReplicatedTables(t *testing.T) {
 	})
 	e.stillRunning(t)
 }
+
+// TestCreateTableSelectReplicatesItsRows: with row-based logging the server writes CREATE TABLE ...
+// SELECT as one transaction, the statement and the rows it copied; both reach ClickHouse, and the
+// stream goes on after it.
+func TestCreateTableSelectReplicatesItsRows(t *testing.T) {
+	t.Parallel()
+	my := testenv.StartMySQL(t)
+	ch := testenv.StartClickHouse(t)
+	mustExec(t, my,
+		"CREATE TABLE binwave.acct (id INT PRIMARY KEY, owner VARCHAR(20) NOT NULL, qty INT NOT NULL)",
+		"INSERT INTO binwave.acct VALUES (1, 'a', 1), (2, 'b', 2)")
+	e := startEngine(t, engineConfig(t, my, ch, "clickhouse"))
+
+	mustExec(t, my, "CREATE TABLE binwave.copy (PRIMARY KEY (id)) SELECT * FROM binwave.acct", "INSERT INTO binwave.acct VALUES (3, 'c', 3)")
+	waitUntil(t, "the copied rows", 60*time.Second, func() bool { return chRowCount(t, ch, "copy") == 2 })
+	waitUntil(t, "the row after it", 60*time.Second, func() bool { return chRowCount(t, ch, "acct") == 1 }) // the engine started at the current position
+	if err := e.stop(t); err != nil {
+		t.Errorf("graceful stop returned %v", err)
+	}
+}
