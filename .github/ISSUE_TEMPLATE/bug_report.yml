@@ -1,0 +1,67 @@
+name: Bug report
+description: Something binwave does wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Please remove hosts, passwords and anything private from what you paste.
+        A security issue goes to the [security policy](https://github.com/thealexjo/binwave/security/policy), not here.
+  - type: input
+    id: version
+    attributes:
+      label: binwave version
+      description: The output of `binwave version`.
+    validations:
+      required: true
+  - type: input
+    id: mysql
+    attributes:
+      label: MySQL version
+      description: MySQL or Percona Server, for example `8.4.6` or `Percona Server 8.0.28`.
+    validations:
+      required: true
+  - type: input
+    id: clickhouse
+    attributes:
+      label: ClickHouse version
+      placeholder: "26.8"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How binwave runs
+      options:
+        - systemd
+        - Docker
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what binwave did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The statements run on MySQL, if any, with table names of your own choosing.
+      placeholder: |
+        1. CREATE TABLE shop.items (id INT PRIMARY KEY, name VARCHAR(20));
+        2. ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines
+      description: The lines around the problem, with their codes (`[TBL101]` and the like). `binwave replication status` helps too.
+      render: text
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The output of `binwave check --print` (secrets are masked). Remove anything private.
+      render: yaml

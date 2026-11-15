@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/thealexjo/binwave/security/policy
+    about: Report a vulnerability privately, not in a public issue.
+  - name: Installation and setup
+    url: https://github.com/thealexjo/binwave/blob/main/docs/deployment.md
+    about: The guide for the source, users and privileges, configuration, systemd and Docker.
