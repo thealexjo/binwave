@@ -53,6 +53,13 @@ GRANT CREATE TABLE, INSERT, SELECT, ALTER TABLE, DROP TABLE ON replica.* TO binw
 
 If `tables.target_database` is not set, the target databases are named like the source databases and are created/checked lazily on the first write into each of them — then the privileges are needed there too (`INSERT`; with auto-DDL on, `CREATE TABLE` and `ALTER TABLE`; and with `ddl.mode: full`, also `DROP TABLE`, because `RENAME TABLE` in ClickHouse requires it on the source table). The simplest way is to grant the same privileges on all databases replication should go to, or to set `tables.target_database` right away so that everything goes into one database with the privileges already granted.
 
+A user that reads the replicated tables gets `final = 1`, so that every query sees the last version of each row and no deleted rows (see [Reading the data](../README.md#reading-the-data)):
+
+```sql
+CREATE USER reader IDENTIFIED BY '...' SETTINGS final = 1;
+GRANT SELECT ON replica.* TO reader;
+```
+
 ## 4. Getting binwave
 
 ### From a release
@@ -192,7 +199,7 @@ BINWAVE_MYSQL_PASSWORD=...
 BINWAVE_CLICKHOUSE_PASSWORD=...
 ```
 
-systemd reads the file as root before it starts binwave, so only root needs to read it.
+systemd reads the file as root before it starts binwave, so only root needs to read it. It is not a shell script: a value is taken as it is written, `$` and quotes included, so the file is never read with `.` or `source`.
 
 Do not start it right away — check first (step 7).
 
@@ -213,10 +220,15 @@ Both options have the same contract: a foreground process, logs only to stdout, 
 Without changing anything in the databases — the same thing the service does at start and right after it:
 
 ```bash
-set -a; . /etc/binwave/config.env; set +a   # with Option A: the secrets of the service, as root
-binwave check --print     # config validation, secrets masked
-binwave check --connect   # + connections, source requirements, privileges, table checks
+# With Option A, binwave runs as the service does: its user, config.env read by systemd, its state directory.
+as_service() { systemd-run --quiet --pipe --wait --collect --uid=binwave --gid=binwave \
+  -p EnvironmentFile=/etc/binwave/config.env -p StateDirectory=binwave /usr/local/bin/binwave "$@"; }
+
+as_service check --print     # config validation, secrets masked
+as_service check --connect   # + connections, source requirements, privileges, table checks
 ```
+
+For an instance of the template, the file is `/etc/binwave/<instance>.env` and the commands take `--config /etc/binwave/<instance>.yaml`. With Option B, they run in a one-off container of the service, with its config, volume and environment: `docker compose run --rm binwave-main check --connect` for the compose example.
 
 Exit code: `0` — all is well, `78` — the configuration does not fit these databases, `1` — a database is unavailable.
 

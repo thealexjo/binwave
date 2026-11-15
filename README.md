@@ -15,7 +15,7 @@ binwave connects to MySQL as a replica, reads the binlog by GTID and writes ever
 
 ## Features
 
-- **Nothing lost, nothing doubled.** A crash or a restart picks up exactly where replication stopped.
+- **Nothing lost.** A crash or a restart picks up where replication stopped; the changes written again after a crash replace the same rows (see [Reading the data](#reading-the-data)).
 - **Schema changes follow the source.** New tables, new and changed columns and renames reach ClickHouse on their own, including online migrations with `gh-ost` and `pt-online-schema-change`.
 - **Existing data too.** binwave can load the tables that are already there, and reload any table later, without locking MySQL.
 - **One broken table does not stop the rest.** It is set aside and reported, the others keep replicating.
@@ -63,6 +63,13 @@ curl -s http://127.0.0.1:9187/status
 ```
 
 Remove the demo with `docker compose -f deploy/docker/demo/compose.yaml down -v`.
+
+## Reading the data
+
+Every replicated table is a `ReplacingMergeTree(_version, _is_deleted)` ordered by the MySQL primary key. An update adds a new version of the row, a delete adds a version with `_is_deleted = 1`, and after a crash binwave writes the last changes again. ClickHouse keeps only the last version of a row when it merges the parts, in the background and at no set time; until then a plain `SELECT` also sees the old versions and the deleted rows. Read with `FINAL`:
+
+- in the query: `SELECT ... FROM replica.items FINAL`;
+- for every query of a user: `CREATE USER reader ... SETTINGS final = 1` (see [ClickHouse: database and privileges](docs/deployment.md#3-clickhouse-database-and-privileges)).
 
 ## Documentation
 
