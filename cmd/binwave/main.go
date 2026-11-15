@@ -38,12 +38,12 @@ var defaultConfigPath = "/etc/binwave/config.yaml"
 const usage = `Usage: binwave <command> [flags]
 
 Commands:
-  run        Replicate MySQL changes into ClickHouse until stopped
-  check      Validate a configuration file; with --connect, also check both databases
+  run          Replicate MySQL changes into ClickHouse until stopped
+  check        Validate a configuration file; with --connect, also check both databases
   replication  Pause, resume or show the replication of a running service
-  tables     List the quarantined tables (list), release them (release <table>...) or read them again (resync <table>...)
-  version    Print build information
-  help       Show this help
+  tables       List the quarantined tables (list), release them (release <table>...) or read them again (resync <table>...)
+  version      Print build information
+  help         Show this help
 
 Run 'binwave <command> -h' for command flags.
 `

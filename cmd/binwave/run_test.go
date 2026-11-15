@@ -1058,3 +1058,27 @@ func TestShellQuote(t *testing.T) {
 		}
 	}
 }
+
+// TestTheCommandsOfTheHelpAreAligned: every description starts in the same column.
+func TestTheCommandsOfTheHelpAreAligned(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runWith(context.Background(), []string{"help"}, &stdout, &stderr, depsWith(nil, nil))
+	out := stdout.String() + stderr.String()
+	_, list, ok := strings.Cut(out, "Commands:\n")
+	if !ok {
+		t.Fatalf("no command list:\n%s", out)
+	}
+	list, _, _ = strings.Cut(list, "\n\n")
+	column := -1
+	for _, line := range strings.Split(list, "\n") {
+		name := strings.Fields(line)[0]
+		at := strings.Index(line, name) + len(name)
+		desc := at + len(line[at:]) - len(strings.TrimLeft(line[at:], " "))
+		if column == -1 {
+			column = desc
+		}
+		if desc != column || line[desc-2:desc] != "  " {
+			t.Errorf("%q: the description starts at %d, want %d after at least two spaces", line, desc, column)
+		}
+	}
+}
