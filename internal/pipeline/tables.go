@@ -12,6 +12,18 @@ import (
 // and renames of the stream. It counts the tables for the observer; it decides nothing.
 type sourceTables struct {
 	names map[string]bool
+	// While the catalog is read, the changes of the stream are kept in their order, so that they are
+	// applied again over the catalog, whenever it was read (see TablesReading).
+	reading bool
+	journal []tableChange
+}
+
+// tableChange is a change of the set made while the catalog is read: a table added or removed, or,
+// with database, every table of a database removed.
+type tableChange struct {
+	add      bool
+	name     string
+	database string
 }
 
 // add records the selected tables of names and reports whether the set changed.
@@ -28,6 +40,11 @@ func (s *sourceTables) add(r *Router, names ...string) bool {
 		s.names[name] = true
 		changed = true
 	}
+	if s.reading {
+		for _, name := range names {
+			s.journal = append(s.journal, tableChange{add: true, name: name})
+		}
+	}
 	return changed
 }
 
@@ -38,6 +55,9 @@ func (s *sourceTables) remove(names ...string) bool {
 		if s.names[name] {
 			delete(s.names, name)
 			changed = true
+		}
+		if s.reading {
+			s.journal = append(s.journal, tableChange{name: name})
 		}
 	}
 	return changed
@@ -52,15 +72,47 @@ func (s *sourceTables) removeDatabase(database string) bool {
 			changed = true
 		}
 	}
+	if s.reading {
+		s.journal = append(s.journal, tableChange{database: database})
+	}
 	return changed
 }
 
-// TablesFound adds the source tables the check after the start read from the catalog; those the
-// configuration does not select are left out. It may be called from any goroutine.
+// found adds the tables of a catalog, then applies again every change the stream made while it was
+// read: the last change of a table is what holds, whether the catalog saw it or not.
+func (s *sourceTables) found(r *Router, names []string) bool {
+	journal := s.journal
+	s.reading, s.journal = false, nil
+	before := len(s.names)
+	changed := s.add(r, names...)
+	for _, c := range journal {
+		switch {
+		case c.database != "":
+			s.removeDatabase(c.database)
+		case c.add:
+			s.add(r, c.name)
+		default:
+			s.remove(c.name)
+		}
+	}
+	return changed || len(s.names) != before
+}
+
+// TablesReading tells the pipeline that the check after the start begins to read the catalog, before
+// it does; TablesFound ends the reading. It may be called from any goroutine.
+func (p *Pipeline) TablesReading() {
+	p.tablesMu.Lock()
+	defer p.tablesMu.Unlock()
+	p.tables.reading, p.tables.journal = true, nil
+}
+
+// TablesFound adds the source tables the check after the start read from the catalog (none, when it
+// could not be read); those the configuration does not select are left out. It may be called from
+// any goroutine.
 func (p *Pipeline) TablesFound(names []string) {
 	p.tablesMu.Lock()
 	defer p.tablesMu.Unlock()
-	if p.tables.add(p.router, names...) {
+	if p.tables.found(p.router, names) {
 		p.d.Observer.TablesSelected(len(p.tables.names))
 	}
 }

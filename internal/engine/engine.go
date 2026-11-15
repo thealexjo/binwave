@@ -263,6 +263,7 @@ func (e *Engine) run(ctx context.Context, hooks app.Hooks) error {
 
 // preflightTarget is what the preflight tells the pipeline: the tables it found, and the ones to set aside.
 type preflightTarget interface {
+	TablesReading()
 	TablesFound(names []string)
 	Quarantine(table string, code errcode.Code, reason string) bool
 }
@@ -271,8 +272,10 @@ type preflightTarget interface {
 // ends the run with a *app.ConfigError as the cause. A problem of a table sets that table aside
 // and the rest goes on; with tables.on_replication_error: stop it ends the run like the mistake.
 func (e *Engine) preflight(ctx context.Context, src catalogReader, guard *tableGuard, q preflightTarget, stop context.CancelCauseFunc) {
+	q.TablesReading()
 	cat, err := src.Catalog(ctx, "", "")
 	if err != nil {
+		q.TablesFound(nil)
 		if ctx.Err() == nil {
 			e.log.Warn("preflight skipped: catalog unreadable", "error", err)
 		}

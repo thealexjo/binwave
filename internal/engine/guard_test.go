@@ -156,9 +156,15 @@ type fakeQuarantiner struct {
 	tables map[string]string
 	codes  map[string]errcode.Code
 	found  []string
+	calls  []string // TablesReading and TablesFound, in their order
 }
 
-func (f *fakeQuarantiner) TablesFound(names []string) { f.found = append(f.found, names...) }
+func (f *fakeQuarantiner) TablesReading() { f.calls = append(f.calls, "reading") }
+
+func (f *fakeQuarantiner) TablesFound(names []string) {
+	f.found = append(f.found, names...)
+	f.calls = append(f.calls, "found")
+}
 
 func (f *fakeQuarantiner) Quarantine(table string, code errcode.Code, reason string) bool {
 	if f.tables == nil {
@@ -205,6 +211,9 @@ func TestPreflightTellsThePipelineEveryTableItFound(t *testing.T) {
 	q, _ := runPreflight(t, guardConfig(config.CascadesError), cascadingCatalog())
 	if want := []string{"shop.orders", "shop.keyless"}; !slices.Equal(q.found, want) {
 		t.Errorf("found %v, want %v", q.found, want)
+	}
+	if want := []string{"reading", "found"}; !slices.Equal(q.calls, want) {
+		t.Errorf("calls %v, want %v: the stream's changes are kept from before the catalog is read", q.calls, want)
 	}
 }
 

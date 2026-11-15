@@ -308,3 +308,29 @@ func TestTheTablesAreCountedFromTheCatalogAndTheStream(t *testing.T) {
 		t.Errorf("observed %v, want %v", got, want)
 	}
 }
+
+// TestACatalogReadBeforeADropDoesNotBringTheTableBack: the check after the start reads the catalog
+// while the stream goes on; a table the stream dropped meanwhile is not counted again when the
+// catalog that still had it arrives.
+func TestACatalogReadBeforeADropDoesNotBringTheTableBack(t *testing.T) {
+	h := newHarness(t)
+	obs := &fakeObserver{}
+	h.obs = obs
+	p := h.pipeline(t)
+	p.TablesReading()
+	h.source.script = []scriptedTx{
+		tx(1, insertRows(itemsTable(), 1, "a")),
+		tx(2, event.DDL{Database: "shop", Query: "DROP TABLE items"}),
+		tx(3, event.DDL{Database: "shop", Query: "CREATE TABLE fresh (id INT PRIMARY KEY)"}),
+	}
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatal(err)
+	}
+	p.TablesFound([]string{"shop.items", "shop.quiet"})
+
+	got := obs.sequence("tables")
+	want := []string{"tables 1", "tables 0", "tables 1", "tables 2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("observed %v, want %v: shop.quiet and shop.fresh, without the dropped shop.items", got, want)
+	}
+}
