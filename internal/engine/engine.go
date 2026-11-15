@@ -7,7 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -85,13 +88,11 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) *Engine {
 func (e *Engine) Run(ctx context.Context, hooks app.Hooks) error {
 	// The control channel exists from the first moment, like the observability server, so that
 	// `binwave replication status` answers "starting" instead of "not running".
-	if socket := e.cfg.Control.Socket; socket != "" {
-		stop, err := control.Serve(socket, &controlBackend{e: e}, e.log)
-		if err != nil {
-			return err
-		}
-		defer stop()
+	stop, err := e.serveControl()
+	if err != nil {
+		return err
 	}
+	defer stop()
 	return e.retryStartup(ctx, hooks, e.run)
 }
 
@@ -390,4 +391,25 @@ func classify(err error) error {
 		return &app.ConfigError{Err: fmt.Errorf("%s: %w", hint, err)}
 	}
 	return err
+}
+
+// serveControl serves the control channel on control.socket. The default socket is in the
+// RuntimeDirectory of the unit; without that directory, as outside systemd and Docker, the service
+// runs with no channel. A socket that is set and cannot be served is an error.
+func (e *Engine) serveControl() (stop func(), err error) {
+	socket := e.cfg.Control.Socket
+	if socket == config.DefaultControlSocket && !isDir(filepath.Dir(socket)) {
+		e.log.Warn("control channel is off: no directory for the default socket", "socket", socket)
+		return func() {}, nil
+	}
+	stop, err = control.Serve(socket, &controlBackend{e: e}, e.log)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+		return nil, &app.ConfigError{Err: err} // a directory that is missing or not the service's
+	}
+	return stop, err
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }

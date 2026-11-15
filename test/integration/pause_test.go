@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/thealexjo/binwave/internal/control"
-	"github.com/thealexjo/binwave/internal/engine"
 	"github.com/thealexjo/binwave/internal/observability"
 	"github.com/thealexjo/binwave/test/testenv"
 )
@@ -182,15 +181,15 @@ func TestTablesCommandsWorkOnARunningServiceThroughTheControlChannel(t *testing.
 	e := startHubEngine(t, cfg)
 	waitUntil(t, "the keyless table to be quarantined", 60*time.Second, func() bool { return len(e.quarantinedTables()) == 1 })
 
-	admin := engine.New(cfg, quietLogger())
-	entries, err := admin.Quarantined(context.Background())
+	c := control.Client{Socket: cfg.Control.Socket}
+	entries, err := c.Quarantined(context.Background())
 	if err != nil || len(entries) != 1 || entries[0].Table != "binwave.later" {
 		t.Fatalf("Quarantined() = %+v, %v, want the table from the running service", entries, err)
 	}
 
 	// The cause is fixed, then the table is released, all with the service running.
 	mustExec(t, my, "ALTER TABLE binwave.later ADD PRIMARY KEY (id)")
-	released, unknown, err := admin.Release(context.Background(), []string{"binwave.later", "binwave.nope"}, false)
+	released, unknown, err := c.Release(context.Background(), []string{"binwave.later", "binwave.nope"})
 	if err != nil || len(released) != 1 || len(unknown) != 1 {
 		t.Fatalf("Release() = %v, %v, %v", released, unknown, err)
 	}

@@ -10,7 +10,6 @@ import (
 
 	"github.com/thealexjo/binwave/internal/checkpoint"
 	"github.com/thealexjo/binwave/internal/config"
-	"github.com/thealexjo/binwave/internal/control"
 	"github.com/thealexjo/binwave/internal/pipeline"
 	chsink "github.com/thealexjo/binwave/internal/sink/clickhouse"
 	mysqlsrc "github.com/thealexjo/binwave/internal/source/mysql"
@@ -34,23 +33,9 @@ func (e *Engine) openStore(ctx context.Context) (pipeline.Store, func(), error) 
 	return store, func() { _ = sink.Close() }, nil
 }
 
-// client is the control channel of a running service, when there is one to ask.
-func (e *Engine) client() (control.Client, bool) {
-	if e.cfg.Control.Socket == "" {
-		return control.Client{}, false
-	}
-	return control.Client{Socket: e.cfg.Control.Socket}, true
-}
-
-// Quarantined returns the tables that are set aside: from the running service if there is one,
-// otherwise from the saved state.
+// Quarantined returns the tables that are set aside in the saved state. A running service is asked
+// over its control socket instead (control.Client).
 func (e *Engine) Quarantined(ctx context.Context) ([]checkpoint.Quarantined, error) {
-	if c, ok := e.client(); ok {
-		entries, err := c.Quarantined(ctx)
-		if err == nil || !errors.Is(err, control.ErrNotRunning) {
-			return entries, err
-		}
-	}
 	store, closeStore, err := e.openStore(ctx)
 	if err != nil {
 		return nil, err
@@ -67,32 +52,12 @@ func (e *Engine) Quarantined(ctx context.Context) ([]checkpoint.Quarantined, err
 	return checkpoint.DecodeQuarantine(pos.Quarantine)
 }
 
-// Resync asks the running service to read tables again from the source and replace their ClickHouse
-// tables with the copy. It needs the running service, which holds the position the resync is tied to.
-func (e *Engine) Resync(ctx context.Context, tables []string) ([]control.ResyncResult, error) {
-	c, ok := e.client()
-	if !ok {
-		return nil, errors.New("a resync is run by the service: set control.socket, and start the service")
-	}
-	results, err := c.Resync(ctx, tables)
-	if errors.Is(err, control.ErrNotRunning) {
-		return nil, fmt.Errorf("%w: a resync is run by the service, start it first", err)
-	}
-	return results, err
-}
-
-// Release takes tables out of quarantine: from then on their changes are replicated again. The
-// changes made while they were quarantined are not in ClickHouse, and releasing does not bring
-// them. unknown are the requested tables that were not quarantined. Unless force is set, it
-// refuses while the service seems to run, because the service saves its own state over it.
+// Release takes tables out of quarantine in the saved state: from then on their changes are
+// replicated again. The changes made while they were quarantined are not in ClickHouse, and
+// releasing does not bring them. unknown are the requested tables that were not quarantined. A
+// running service does it itself, over its control socket; unless force is set, this refuses while
+// the service seems to run, because the service saves its own state over it.
 func (e *Engine) Release(ctx context.Context, tables []string, force bool) (released, unknown []string, err error) {
-	// A running service does it itself: it holds the state.
-	if c, ok := e.client(); ok {
-		released, unknown, err := c.Release(ctx, tables)
-		if err == nil || !errors.Is(err, control.ErrNotRunning) {
-			return released, unknown, err
-		}
-	}
 	if !force && e.serviceAnswers() {
 		return nil, nil, fmt.Errorf("%w: observability.listen %s answers. Stop the service first; releasing tables in a running service would be undone by its next save (--force skips this check)",
 			ErrServiceRunning, e.cfg.Observability.Listen)

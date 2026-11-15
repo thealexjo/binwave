@@ -31,8 +31,8 @@ type runDeps struct {
 	newChecker func(cfg *config.Config, log *slog.Logger) (checker, error)
 	// newTables builds what `binwave tables` runs.
 	newTables func(cfg *config.Config, log *slog.Logger) (tablesAdmin, error)
-	// newControl builds the client of the control socket for `binwave replication`.
-	newControl func(socket string) replicationControl
+	// newControl builds the client of the control socket for `binwave replication` and `binwave tables`.
+	newControl func(socket string) controlClient
 }
 
 // checker inspects both databases without replicating.
@@ -40,18 +40,17 @@ type checker interface {
 	Check(ctx context.Context, out io.Writer) error
 }
 
-// tablesAdmin manages the quarantined tables of the saved state.
+// tablesAdmin manages the quarantined tables of the saved state, without a running service.
 type tablesAdmin interface {
 	Quarantined(ctx context.Context) ([]checkpoint.Quarantined, error)
 	Release(ctx context.Context, tables []string, force bool) (released, unknown []string, err error)
-	Resync(ctx context.Context, tables []string) ([]control.ResyncResult, error)
 }
 
 func productionDeps() runDeps {
 	return runDeps{
 		env: os.LookupEnv, pid: os.Getpid(), newRunner: newEngine, serve: observability.Serve,
 		newChecker: newEngineChecker, newTables: newEngineTables,
-		newControl: func(socket string) replicationControl { return control.Client{Socket: socket} },
+		newControl: func(socket string) controlClient { return control.Client{Socket: socket} },
 	}
 }
 

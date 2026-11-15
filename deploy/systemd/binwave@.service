@@ -46,6 +46,10 @@ RestartPreventExitStatus=78
 StateDirectory=binwave/%i
 StateDirectoryMode=0750
 
+# The control socket: set control.socket to /run/binwave/<instance>/binwave.sock in the config.
+RuntimeDirectory=binwave/%i
+RuntimeDirectoryMode=0750
+
 LimitNOFILE=65536
 
 # Hardening

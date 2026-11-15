@@ -169,7 +169,7 @@ Secrets go only through `${ENV}` (a value from the process environment), not as 
 
 **`/etc/binwave/config.yaml`** is the default path built into the binary: without `--config`, all commands (`run`, `check`, `replication ...`, `tables ...`) use exactly this file. This guide uses it (step 6 puts the config exactly there), so from here on this guide never passes `--config` explicitly.
 
-If the host has several sources, each has its own process and its own config: then the default path does not fit (there is one per host) and each instance needs an explicit `--config /etc/binwave/<instance>.yaml` — this is exactly the difference between the template `binwave@.service` and the plain `binwave.service` (section 6).
+If the host has several sources, each has its own process and its own config: then the default path does not fit (there is one per host) and each instance needs an explicit `--config /etc/binwave/<instance>.yaml` — this is exactly the difference between the template `binwave@.service` and the plain `binwave.service` (section 6). The control socket is per instance too: each config sets `control: {socket: /run/binwave/<instance>/binwave.sock}`, the `RuntimeDirectory=` of its instance.
 
 ## 6. Installing binwave
 
@@ -238,6 +238,8 @@ Exit code: `0` — all is well, `78` — the configuration does not fit these da
 systemctl enable --now binwave
 journalctl -u binwave -f
 ```
+
+These commands talk to the running service over its control socket, `/run/binwave/binwave.sock` (the unit's `RuntimeDirectory=`, private to the `binwave` user). From the config they read only `control.socket`, so they need none of the secrets of `config.env`: run them as the service's user or as root, `sudo -u binwave binwave replication status`. With the template `binwave@<instance>`, each instance's config sets its own socket, `control: {socket: /run/binwave/<instance>/binwave.sock}`, and the commands take that config: `sudo -u binwave binwave replication status --config /etc/binwave/<instance>.yaml`. In Docker they run with `docker exec`, on the same default socket.
 
 - `binwave replication status` — the state (`ready`/`paused`/`failed`), GTID position, lag, the number of tables and of quarantined ones;
 - `binwave tables list` — what went to quarantine and why; `release --accept-data-gap <db.table>` returns it as it is (a table without a key or with a cascading foreign key is checked again before its next row and goes back to quarantine while the cause is there), `resync <db.table>` reads the table again (the service must be running);

@@ -94,7 +94,8 @@ const (
 type Control struct {
 	// Socket is the path of the Unix socket the service listens on for the commands of
 	// `binwave replication` and `binwave tables`. The socket is private to the service's user.
-	// Empty disables the channel; the default is binwave.sock in $STATE_DIRECTORY.
+	// The default is /run/binwave/binwave.sock, the RuntimeDirectory of binwave.service; without
+	// that directory the service runs with no channel.
 	Socket string `yaml:"socket"`
 }
 

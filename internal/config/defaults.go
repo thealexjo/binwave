@@ -20,7 +20,7 @@ const (
 	DefaultCheckpointStore       = CheckpointClickHouse
 	DefaultCheckpointTable       = "binwave_state"
 	DefaultCheckpointFileName    = "checkpoint.json"
-	DefaultControlSocketName     = "binwave.sock"
+	DefaultControlSocket         = "/run/binwave/binwave.sock"
 	DefaultBufferMaxRows         = 100_000
 	DefaultBufferMaxBytes        = 64 * MiB
 	DefaultBufferFlush           = Duration(250 * time.Millisecond)
@@ -80,11 +80,7 @@ func (c *Config) applyDefaults(env EnvLookup) {
 		autostart := true
 		c.Replication.Autostart = &autostart
 	}
-	if c.Control.Socket == "" {
-		if dir, ok := env(StateDirectoryEnv); ok && dir != "" {
-			c.Control.Socket = filepath.Join(filepath.SplitList(dir)[0], DefaultControlSocketName)
-		}
-	}
+	setDefault(&c.Control.Socket, DefaultControlSocket)
 
 	cp := &c.Checkpoint
 	setDefault(&cp.Store, DefaultCheckpointStore)

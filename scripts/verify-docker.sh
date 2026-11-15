@@ -31,8 +31,9 @@ if [[ "$code" != "78" ]]; then
 	exit 1
 fi
 
-# binwave run creates its control socket in the state directory before it connects anywhere,
-# so a new named volume must be writable by the user of the image. No network: nothing is reached.
+# binwave run creates its control socket in /run/binwave before it connects anywhere, so it must be
+# writable by the user of the image in a read-only container, as the state volume must. No network:
+# nothing is reached.
 volume="binwave-verify-$$"
 container=""
 cleanup() {
@@ -60,6 +61,13 @@ done
 if ! served; then
 	echo "binwave run did not serve its control socket on a new volume:" >&2
 	docker logs "$container" >&2
+	exit 1
+fi
+
+# The commands reach the service on the default socket, as with docker exec on a host.
+if ! status="$(docker exec "$container" /usr/local/bin/binwave replication status 2>&1)" || ! grep -q '^state:' <<<"$status"; then
+	echo "binwave replication status did not reach the service in the container:" >&2
+	echo "$status" >&2
 	exit 1
 fi
 

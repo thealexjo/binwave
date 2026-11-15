@@ -37,7 +37,7 @@ replication:
         largest_first: true
         chunk_max_bytes: 32MiB
 control:
-    socket: ""
+    socket: /run/binwave/binwave.sock
 checkpoint:
     store: clickhouse
     table: binwave_state

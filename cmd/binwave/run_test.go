@@ -275,23 +275,9 @@ func (f *fakeAdmin) Release(_ context.Context, tables []string, force bool) (rel
 	return released, unknown, nil
 }
 
-func (f *fakeAdmin) Resync(_ context.Context, tables []string) ([]control.ResyncResult, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	var out []control.ResyncResult
-	for _, t := range tables {
-		r := control.ResyncResult{Table: t}
-		if t == "shop.nope" {
-			r.Error = "shop.nope is not a replicated table"
-		}
-		out = append(out, r)
-	}
-	return out, nil
-}
-
+// tablesDeps runs the tables commands on the saved state of admin: no service answers on the socket.
 func tablesDeps(admin *fakeAdmin) runDeps {
-	deps := depsWith(nil, nil)
+	deps := controlDeps(&fakeControl{err: fmt.Errorf("%w (/run/binwave/binwave.sock)", control.ErrNotRunning)})
 	deps.newTables = func(*config.Config, *slog.Logger) (tablesAdmin, error) { return admin, nil }
 	return deps
 }
@@ -397,11 +383,13 @@ func TestTablesUsageErrors(t *testing.T) {
 	}
 }
 
-// fakeControl is a replicationControl that records calls.
+// fakeControl is a controlClient that records calls.
 type fakeControl struct {
-	calls  []string
-	err    error
-	status observability.Status
+	calls   []string
+	err     error
+	status  observability.Status
+	entries []checkpoint.Quarantined
+	socket  string // the socket it was built for
 }
 
 func (f *fakeControl) Pause(context.Context) error { f.calls = append(f.calls, "pause"); return f.err }
@@ -426,9 +414,38 @@ func (f *fakeControl) ChunkSize(_ context.Context, rows int) error {
 	return f.err
 }
 
+func (f *fakeControl) Quarantined(context.Context) ([]checkpoint.Quarantined, error) {
+	f.calls = append(f.calls, "quarantined")
+	return f.entries, f.err
+}
+
+func (f *fakeControl) Release(_ context.Context, tables []string) (released, unknown []string, err error) {
+	f.calls = append(f.calls, "release "+strings.Join(tables, " "))
+	return tables, nil, f.err
+}
+
+func (f *fakeControl) Resync(_ context.Context, tables []string) ([]control.ResyncResult, error) {
+	f.calls = append(f.calls, "resync")
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []control.ResyncResult
+	for _, t := range tables {
+		r := control.ResyncResult{Table: t}
+		if t == "shop.nope" {
+			r.Error = "shop.nope is not a replicated table"
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 func controlDeps(f *fakeControl) runDeps {
 	deps := depsWith(nil, nil)
-	deps.newControl = func(string) replicationControl { return f }
+	deps.newControl = func(socket string) controlClient { f.socket = socket; return f }
+	deps.newTables = func(*config.Config, *slog.Logger) (tablesAdmin, error) {
+		return nil, errors.New("the saved state was read although the service answers")
+	}
 	return deps
 }
 
@@ -499,13 +516,55 @@ func TestReplicationUsageAndConfigurationErrors(t *testing.T) {
 	if code := runWith(context.Background(), []string{"replication", "pause", "--config", ""}, &stdout, &stderr, controlDeps(&fakeControl{})); code != exitUsage {
 		t.Errorf("empty config: exit code = %d", code)
 	}
-	// A configuration without a control socket cannot be used with these commands.
+	// A socket that is not absolute is a configuration error.
 	stderr.Reset()
-	code := runWith(context.Background(), []string{"replication", "status", "--config", writeConfig(t, validConfig)}, &stdout, &stderr, controlDeps(&fakeControl{}))
+	code := runWith(context.Background(), []string{"replication", "status", "--config", writeConfig(t, "control: {socket: binwave.sock}\n")}, &stdout, &stderr, controlDeps(&fakeControl{}))
 	if code != exitConfig {
-		t.Errorf("no control socket: exit code = %d, want %d", code, exitConfig)
+		t.Errorf("relative control socket: exit code = %d, want %d", code, exitConfig)
 	}
-	assertContains(t, "stderr", stderr.String(), "control.socket is not configured")
+	assertContains(t, "stderr", stderr.String(), "control.socket: must be an absolute path")
+}
+
+// TestTheControlCommandsNeedOnlyTheSocket: on a systemd host the secrets are in the environment of
+// the service, not of the operator's shell, and the commands that talk to the service do not need them.
+func TestTheControlCommandsNeedOnlyTheSocket(t *testing.T) {
+	withSecret := "source:\n  mysql:\n    password: ${BINWAVE_TEST_UNSET_PASSWORD}\n"
+	for name, tt := range map[string]struct{ yaml, socket string }{
+		"default socket": {withSecret, config.DefaultControlSocket},
+		"its own socket": {withSecret + "control:\n  socket: /run/binwave/a/binwave.sock\n", "/run/binwave/a/binwave.sock"},
+	} {
+		cfg := writeConfig(t, tt.yaml)
+		for _, args := range [][]string{
+			{"replication", "status", "--config", cfg},
+			{"tables", "list", "--config", cfg},
+			{"tables", "release", "--accept-data-gap", "--config", cfg, "shop.orders"},
+			{"tables", "resync", "--config", cfg, "shop.orders"},
+		} {
+			f := &fakeControl{status: observability.Status{State: observability.StateReady}}
+			var stdout, stderr bytes.Buffer
+			if code := runWith(context.Background(), args, &stdout, &stderr, controlDeps(f)); code != exitOK {
+				t.Errorf("%s: %v: exit code = %d\n%s", name, args[:2], code, stderr.String())
+			}
+			if f.socket != tt.socket {
+				t.Errorf("%s: %v: socket = %q, want %q", name, args[:2], f.socket, tt.socket)
+			}
+		}
+	}
+}
+
+// TestTablesWithoutAServiceNeedTheWholeConfiguration: the saved state is read with the
+// configuration of the service, so its secrets are needed then.
+func TestTablesWithoutAServiceNeedTheWholeConfiguration(t *testing.T) {
+	cfg := writeConfig(t, strings.Replace(validConfig, "password: top-secret", `password: "${BINWAVE_TEST_UNSET_PASSWORD}"`, 1))
+	var stdout, stderr bytes.Buffer
+
+	code := runWith(context.Background(), []string{"tables", "list", "--config", cfg}, &stdout, &stderr, tablesDeps(&fakeAdmin{}))
+
+	if code != exitConfig {
+		t.Errorf("exit code = %d, want %d", code, exitConfig)
+	}
+	assertContains(t, "stderr", stderr.String(), "no service answers on /run/binwave/binwave.sock")
+	assertContains(t, "stderr", stderr.String(), "BINWAVE_TEST_UNSET_PASSWORD is not set")
 }
 
 func TestReplicationResumeCanSkipTransactions(t *testing.T) {
@@ -660,10 +719,10 @@ func TestReplicationStatusShowsARebuildInProgress(t *testing.T) {
 }
 
 func TestTablesResyncReportsWhichBeganAndWhichWereRefused(t *testing.T) {
-	admin := &fakeAdmin{}
+	f := &fakeControl{}
 	var stdout, stderr bytes.Buffer
 
-	code := runWith(context.Background(), []string{"tables", "resync", "--config", writeConfig(t, validConfig), "shop.orders", "shop.nope"}, &stdout, &stderr, tablesDeps(admin))
+	code := runWith(context.Background(), []string{"tables", "resync", "--config", writeConfig(t, validConfig), "shop.orders", "shop.nope"}, &stdout, &stderr, controlDeps(f))
 
 	if code != exitError {
 		t.Errorf("exit code = %d, want %d: one table was refused", code, exitError)
@@ -673,10 +732,17 @@ func TestTablesResyncReportsWhichBeganAndWhichWereRefused(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = runWith(context.Background(), []string{"tables", "resync", "--config", writeConfig(t, validConfig)}, &stdout, &stderr, tablesDeps(admin))
+	code = runWith(context.Background(), []string{"tables", "resync", "--config", writeConfig(t, validConfig)}, &stdout, &stderr, controlDeps(f))
 	if code != exitUsage {
 		t.Errorf("exit code without tables = %d, want %d", code, exitUsage)
 	}
+
+	stderr.Reset()
+	code = runWith(context.Background(), []string{"tables", "resync", "--config", writeConfig(t, validConfig), "shop.orders"}, &stdout, &stderr, tablesDeps(&fakeAdmin{}))
+	if code != exitError {
+		t.Errorf("exit code without a service = %d, want %d", code, exitError)
+	}
+	assertContains(t, "stderr", stderr.String(), "a resync is run by the service, start it first")
 }
 
 func TestReplicationStatusShowsTheProgressOfAResync(t *testing.T) {
@@ -906,11 +972,11 @@ func TestStatusSaysWhetherTheErrorIsStillHappening(t *testing.T) {
 func TestFlagsAfterThePositionalArgumentsApplyToTheCommand(t *testing.T) {
 	cfg := writeConfig(t, controlConfig)
 	t.Run("tables resync", func(t *testing.T) {
-		admin := &fakeAdmin{}
+		f := &fakeControl{}
 		var stdout, stderr bytes.Buffer
-		code := runWith(context.Background(), []string{"tables", "resync", "shop.orders", "--config", cfg}, &stdout, &stderr, tablesDeps(admin))
-		if code != exitOK || strings.Count(stdout.String(), "resync begun") != 1 {
-			t.Errorf("exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+		code := runWith(context.Background(), []string{"tables", "resync", "shop.orders", "--config", cfg}, &stdout, &stderr, controlDeps(f))
+		if code != exitOK || strings.Count(stdout.String(), "resync begun") != 1 || f.socket != "/tmp/binwave-test.sock" {
+			t.Errorf("exit %d, socket %q\nstdout: %s\nstderr: %s", code, f.socket, stdout.String(), stderr.String())
 		}
 	})
 	t.Run("tables release", func(t *testing.T) {
@@ -930,9 +996,8 @@ func TestFlagsAfterThePositionalArgumentsApplyToTheCommand(t *testing.T) {
 		}
 	})
 	t.Run("after --, everything is a table", func(t *testing.T) {
-		admin := &fakeAdmin{}
 		var stdout, stderr bytes.Buffer
-		code := runWith(context.Background(), []string{"tables", "resync", "--config", cfg, "--", "shop.orders", "--force"}, &stdout, &stderr, tablesDeps(admin))
+		code := runWith(context.Background(), []string{"tables", "resync", "--config", cfg, "--", "shop.orders", "--force"}, &stdout, &stderr, controlDeps(&fakeControl{}))
 		if code != exitOK || !strings.Contains(stdout.String(), "--force: resync begun") {
 			t.Errorf("exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 		}

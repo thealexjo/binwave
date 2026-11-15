@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/thealexjo/binwave/internal/app"
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/control"
 	"github.com/thealexjo/binwave/internal/failure"
@@ -109,5 +112,46 @@ func TestResumeOfAFailedTransactionPassesTheSkipOn(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Errorf("loop() = %v", err)
+	}
+}
+
+// TestTheDefaultSocketWithoutItsDirectoryLeavesTheChannelOff: outside systemd and Docker there is no
+// /run/binwave, and the service runs without the channel; a socket that is set must be served.
+func TestTheDefaultSocketWithoutItsDirectoryLeavesTheChannelOff(t *testing.T) {
+	if isDir(filepath.Dir(config.DefaultControlSocket)) {
+		t.Skipf("%s exists on this host", filepath.Dir(config.DefaultControlSocket))
+	}
+	var logs strings.Builder
+	e := New(&config.Config{Control: config.Control{Socket: config.DefaultControlSocket}}, slog.New(slog.NewTextHandler(&logs, nil)))
+	stop, err := e.serveControl()
+	if err != nil {
+		t.Fatalf("serveControl() = %v, want the channel off", err)
+	}
+	stop()
+	if !strings.Contains(logs.String(), "control channel is off") {
+		t.Errorf("no warning that the channel is off:\n%s", logs.String())
+	}
+
+	dir, err := os.MkdirTemp("/tmp", "bwe") // a Unix socket path is short
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	missing := filepath.Join(dir, "missing", "c.sock")
+	e = New(&config.Config{Control: config.Control{Socket: missing}}, slog.New(slog.DiscardHandler))
+	var cfgErr *app.ConfigError
+	if _, err := e.serveControl(); !errors.As(err, &cfgErr) {
+		t.Errorf("serveControl() = %v, want a configuration error: a restart does not make the directory", err)
+	}
+
+	served := filepath.Join(dir, "c.sock")
+	e = New(&config.Config{Control: config.Control{Socket: served}}, slog.New(slog.DiscardHandler))
+	stop, err = e.serveControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if _, err := (control.Client{Socket: served}).Quarantined(context.Background()); errors.Is(err, control.ErrNotRunning) {
+		t.Errorf("the socket that is set is not served: %v", err)
 	}
 }

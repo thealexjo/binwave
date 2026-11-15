@@ -452,8 +452,8 @@ func TestAutostartAndControlSocket(t *testing.T) {
 	if !cfg.Replication.AutostartEnabled() {
 		t.Error("replication must start by itself by default")
 	}
-	if cfg.Control.Socket != "" {
-		t.Errorf("control socket = %q without a state directory, want it disabled", cfg.Control.Socket)
+	if cfg.Control.Socket != DefaultControlSocket {
+		t.Errorf("control socket = %q, want %s", cfg.Control.Socket, DefaultControlSocket)
 	}
 
 	off := mustParse(t, minimal+"replication: {autostart: false}\n", noEnv)
@@ -467,12 +467,42 @@ func TestAutostartAndControlSocket(t *testing.T) {
 		}
 		return "", false
 	})
-	if withState.Control.Socket != "/var/lib/binwave/binwave.sock" {
-		t.Errorf("control socket = %q, want binwave.sock in the state directory", withState.Control.Socket)
+	if withState.Control.Socket != DefaultControlSocket {
+		t.Errorf("control socket = %q with a state directory, want %s: the socket is not state", withState.Control.Socket, DefaultControlSocket)
 	}
 
 	custom := mustParse(t, minimal+"control: {socket: /run/binwave/x.sock}\n", noEnv)
 	if custom.Control.Socket != "/run/binwave/x.sock" {
 		t.Errorf("control socket = %q", custom.Control.Socket)
 	}
+}
+
+// TestTheControlSocketIsReadWithoutTheSecrets: the commands that talk to a running service read the
+// socket path only; the secrets of the rest of the file are not in their environment.
+func TestTheControlSocketIsReadWithoutTheSecrets(t *testing.T) {
+	secret := "source:\n  mysql:\n    password: ${MYSQL_PASSWORD}\n    unknown_key: 1\n"
+	env := func(name string) (string, bool) {
+		if name == "INSTANCE" {
+			return "a", true
+		}
+		return "", false
+	}
+	for name, tt := range map[string]struct{ yaml, want string }{
+		"default":            {secret, DefaultControlSocket},
+		"set":                {secret + "control: {socket: /run/binwave/a/binwave.sock}\n", "/run/binwave/a/binwave.sock"},
+		"from an env var":    {"control:\n  socket: /run/binwave/${INSTANCE}/binwave.sock\n", "/run/binwave/a/binwave.sock"},
+		"empty is a default": {"control: {socket: \"\"}\n", DefaultControlSocket},
+	} {
+		got, err := ParseControlSocket([]byte(tt.yaml), env)
+		if err != nil || got != tt.want {
+			t.Errorf("%s: socket = %q, %v, want %q", name, got, err, tt.want)
+		}
+	}
+
+	_, err := ParseControlSocket([]byte("control: {socket: binwave.sock}\n"), env)
+	assertProblem(t, err, "control.socket: must be an absolute path")
+	_, err = ParseControlSocket([]byte("control:\n  socket: /run/${NOPE}/binwave.sock\n"), env)
+	assertProblem(t, err, "NOPE is not set")
+	_, err = ParseControlSocket([]byte("control: [\n"), env)
+	assertProblem(t, err, "parse config")
 }

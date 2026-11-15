@@ -47,6 +47,10 @@ RestartPreventExitStatus=78
 StateDirectory=binwave
 StateDirectoryMode=0750
 
+# The control socket of `binwave replication` and `binwave tables`: /run/binwave/binwave.sock.
+RuntimeDirectory=binwave
+RuntimeDirectoryMode=0750
+
 LimitNOFILE=65536
 
 # Hardening

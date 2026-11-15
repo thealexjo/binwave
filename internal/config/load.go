@@ -24,6 +24,42 @@ func Load(path string) (*Config, error) {
 	return Parse(data, os.LookupEnv)
 }
 
+// ControlSocket reads the control socket path from the configuration file at path, for the commands
+// that only talk to a running service: nothing else of the file is decoded or expanded, so they need
+// none of the secrets the service is started with.
+func ControlSocket(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read config: %w", err)
+	}
+	return ParseControlSocket(data, os.LookupEnv)
+}
+
+// ParseControlSocket is ControlSocket over the content of the file.
+func ParseControlSocket(data []byte, env EnvLookup) (string, error) {
+	var doc struct {
+		Control struct {
+			Socket string `yaml:"socket"`
+		} `yaml:"control"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("parse config: %w", err)
+	}
+	socket, err := expandString(doc.Control.Socket, env)
+	if err != nil {
+		return "", fmt.Errorf("expand config: control.socket: %w", err)
+	}
+	if socket == "" {
+		socket = DefaultControlSocket
+	}
+	v := &validator{}
+	validateSocket(v, socket)
+	if len(v.problems) > 0 {
+		return "", &ValidationError{Problems: v.problems}
+	}
+	return socket, nil
+}
+
 // Parse decodes configuration from YAML, expanding ${VAR} references in scalar values,
 // then applies defaults and validates the result. Unknown keys are rejected.
 func Parse(data []byte, env EnvLookup) (*Config, error) {

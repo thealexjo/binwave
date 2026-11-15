@@ -39,7 +39,7 @@ replication:
     # chunk_max_bytes: 32MiB         # a chunk is held in memory whole: this bounds it whatever chunk_size says; 0 removes the bound
 
 control:
-  # socket: /var/lib/binwave/binwave.sock  # Unix socket for `binwave replication pause|resume|status` and `binwave tables`; private to the service's user; default: $STATE_DIRECTORY/binwave.sock, empty without it disables the channel
+  # socket: /run/binwave/binwave.sock  # Unix socket for `binwave replication` and `binwave tables`; private to the service's user; the default; without its directory the service runs with no channel; binwave@<instance>: /run/binwave/<instance>/binwave.sock
 
 checkpoint:
   # store: clickhouse               # clickhouse | file

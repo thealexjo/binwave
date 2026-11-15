@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/thealexjo/binwave/internal/config"
+	"github.com/thealexjo/binwave/internal/control"
 	"github.com/thealexjo/binwave/internal/observability"
 	"github.com/thealexjo/binwave/internal/termstyle"
 )
@@ -29,9 +30,12 @@ const tablesUsage = `Usage: binwave tables <list|release|resync> [--config FILE]
                            table leaves quarantine when its resync begins; "binwave replication status" shows
                            how far each resync is.
 
-With a running service the commands go through its control socket. Without one they work on the
-saved state; then release refuses while something answers on observability.listen, because a
-service would save its own state over the change (--force skips that check).
+With a running service the commands go through its control socket: control.socket of the
+configuration, /run/binwave/binwave.sock by default; nothing else of the configuration is read, so
+the secrets the service is started with are not needed. Without one, list and release work on the
+saved state, with the whole configuration and its secrets; then release refuses while something
+answers on observability.listen, because a service would save its own state over the change
+(--force skips that check).
 `
 
 // runTables implements `binwave tables`.
@@ -72,24 +76,45 @@ func runTables(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 		return exitUsage
 	}
 
-	cfg, err := config.Load(*configPath)
+	socket, err := config.ControlSocket(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "binwave tables %s: %v\n", sub, err)
 		return exitConfig
 	}
-	log, err := observability.NewLogger(stderr, config.Observability{LogLevel: "warn", LogFormat: config.LogText})
-	if err != nil {
-		fmt.Fprintf(stderr, "binwave tables %s: %v\n", sub, err)
-		return exitError
+	c := deps.newControl(socket)
+	if sub == "resync" {
+		return resyncTables(ctx, c, positional, repeatFlags(fs, "config"), stdout, stderr)
 	}
-	admin, err := deps.newTables(cfg, log)
-	if err != nil {
-		fmt.Fprintf(stderr, "binwave tables %s: %v\n", sub, err)
-		return exitError
+	// offline is what works on the saved state without a running service: it needs the whole
+	// configuration, secrets included.
+	offline := func() (tablesAdmin, int) {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "binwave tables %s: no service answers on %s, and the saved state cannot be read: %v\n", sub, socket, err)
+			return nil, exitConfig
+		}
+		log, err := observability.NewLogger(stderr, config.Observability{LogLevel: "warn", LogFormat: config.LogText})
+		if err != nil {
+			fmt.Fprintf(stderr, "binwave tables %s: %v\n", sub, err)
+			return nil, exitError
+		}
+		admin, err := deps.newTables(cfg, log)
+		if err != nil {
+			fmt.Fprintf(stderr, "binwave tables %s: %v\n", sub, err)
+			return nil, exitError
+		}
+		return admin, exitOK
 	}
 
 	if sub == "list" {
-		entries, err := admin.Quarantined(ctx)
+		entries, err := c.Quarantined(ctx)
+		if errors.Is(err, control.ErrNotRunning) {
+			admin, code := offline()
+			if admin == nil {
+				return code
+			}
+			entries, err = admin.Quarantined(ctx)
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "binwave tables list: %v\n", err)
 			return exitError
@@ -112,11 +137,14 @@ func runTables(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 		return exitOK
 	}
 
-	if sub == "resync" {
-		return resyncTables(ctx, admin, positional, repeatFlags(fs, "config"), stdout, stderr)
+	released, unknown, err := c.Release(ctx, positional)
+	if errors.Is(err, control.ErrNotRunning) {
+		admin, code := offline()
+		if admin == nil {
+			return code
+		}
+		released, unknown, err = admin.Release(ctx, positional, *force)
 	}
-
-	released, unknown, err := admin.Release(ctx, positional, *force)
 	if err != nil {
 		fmt.Fprintf(stderr, "binwave tables release: %v\n", err)
 		return exitError
@@ -134,8 +162,12 @@ func runTables(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 }
 
 // resyncTables asks for the resyncs and reports which began.
-func resyncTables(ctx context.Context, admin tablesAdmin, tables []string, again string, stdout, stderr io.Writer) int {
-	results, err := admin.Resync(ctx, tables)
+func resyncTables(ctx context.Context, c controlClient, tables []string, again string, stdout, stderr io.Writer) int {
+	results, err := c.Resync(ctx, tables)
+	if errors.Is(err, control.ErrNotRunning) {
+		fmt.Fprintf(stderr, "binwave tables resync: %v: a resync is run by the service, start it first\n", err)
+		return exitError
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "binwave tables resync: %v\n", err)
 		return exitError

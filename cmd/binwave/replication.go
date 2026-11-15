@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thealexjo/binwave/internal/checkpoint"
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/control"
 	failinfo "github.com/thealexjo/binwave/internal/failure"
@@ -50,16 +51,21 @@ const replicationUsage = `Usage: binwave replication <pause|resume|status|snapsh
             still get smaller chunks than asked. Takes effect on the next chunk of every table being
             read and is not saved: after a restart the configuration decides again.
 
-The commands talk to a running service over the Unix socket control.socket of its configuration.
+The commands talk to a running service over its Unix socket: control.socket of the configuration,
+/run/binwave/binwave.sock by default. Nothing else of the configuration is read, so the secrets the
+service is started with are not needed.
 `
 
-// replicationControl is what the commands need from the control channel.
-type replicationControl interface {
+// controlClient is what the commands need from the control channel of a running service.
+type controlClient interface {
 	Pause(ctx context.Context) error
 	Resume(ctx context.Context, req control.ResumeRequest) error
 	Status(ctx context.Context) (observability.Status, error)
 	SnapshotRate(ctx context.Context, rowsPerSecond int) error
 	ChunkSize(ctx context.Context, rows int) error
+	Quarantined(ctx context.Context) ([]checkpoint.Quarantined, error)
+	Release(ctx context.Context, tables []string) (released, unknown []string, err error)
+	Resync(ctx context.Context, tables []string) ([]control.ResyncResult, error)
 }
 
 // replicationSubcommands are the commands `binwave replication` takes.
@@ -134,16 +140,12 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 		}
 	}
 
-	cfg, err := config.Load(*configPath)
+	socket, err := config.ControlSocket(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "binwave replication %s: %v\n", sub, err)
 		return exitConfig
 	}
-	if cfg.Control.Socket == "" {
-		fmt.Fprintf(stderr, "binwave replication %s: control.socket is not configured, so the service has no control channel (set it, or run under systemd or Docker with a state directory)\n", sub)
-		return exitConfig
-	}
-	c := deps.newControl(cfg.Control.Socket)
+	c := deps.newControl(socket)
 	again := repeatFlags(fs, "config")
 
 	switch sub {

@@ -266,10 +266,10 @@ func (c *Config) validateBuffer(v *validator) {
 const maxSocketPath = 100
 
 func (c *Config) validateControl(v *validator) {
-	path := c.Control.Socket
-	if path == "" {
-		return
-	}
+	validateSocket(v, c.Control.Socket)
+}
+
+func validateSocket(v *validator, path string) {
 	if !filepath.IsAbs(path) {
 		v.addf("control.socket", "must be an absolute path, got %q", path)
 	}
