@@ -158,7 +158,7 @@ func (s *Source) Catalog(ctx context.Context, database, table string) (*schema.C
 		t := byName[ik.key]
 		t.UniqueKeys = append(t.UniqueKeys, *indexes[ik])
 	}
-	if s.version.less(compressedPartitionsFixed) {
+	if s.server.mayMiswriteCompressedPartitions() {
 		for _, k := range partitioned {
 			cols, err := s.compressedColumnsOf(ctx, k.db, k.table)
 			if err != nil {
@@ -200,6 +200,11 @@ func (s *Source) Catalog(ctx context.Context, database, table string) (*schema.C
 // compressedPartitionsFixed is the first version whose Percona Server writes the compressed columns of
 // a partitioned table into the binlog correctly (PS-7806); MySQL itself has no compressed columns.
 var compressedPartitionsFixed = serverVersion{8, 0, 35}
+
+// mayMiswriteCompressedPartitions reports whether the server has PS-7806.
+func (s server) mayMiswriteCompressedPartitions() bool {
+	return s.percona && s.version.less(compressedPartitionsFixed)
+}
 
 // reCompressedColumn finds a compressed column in the output of SHOW CREATE TABLE, which puts every
 // column on a line of its own.

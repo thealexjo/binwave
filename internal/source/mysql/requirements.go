@@ -152,7 +152,7 @@ func checkVariables(vars map[string]string) error {
 
 // readVariables fetches the global values of the variables binwave cares about.
 func readVariables(ctx context.Context, db *sql.DB) (map[string]string, error) {
-	names := []string{"'version'"}
+	names := []string{"'version'", "'version_comment'"}
 	for _, r := range requirements {
 		names = append(names, "'"+r.name+"'")
 		if r.alias != "" {
@@ -183,17 +183,28 @@ func readVariables(ctx context.Context, db *sql.DB) (map[string]string, error) {
 
 // checkRequirements verifies that the server is configured the way binwave needs, and returns its
 // version. It returns a *RequirementsError when it is not.
-func checkRequirements(ctx context.Context, db *sql.DB) (serverVersion, error) {
+func checkRequirements(ctx context.Context, db *sql.DB) (server, error) {
 	vars, err := readVariables(ctx, db)
 	if err != nil {
-		return serverVersion{}, err
+		return server{}, err
 	}
 	if _, ok := vars["version"]; !ok {
-		return serverVersion{}, &RequirementsError{Problems: []string{"cannot read the server version: " + supportedVersions}}
+		return server{}, &RequirementsError{Problems: []string{"cannot read the server version: " + supportedVersions}}
 	}
 	if err := checkVariables(vars); err != nil {
-		return serverVersion{}, err
+		return server{}, err
 	}
+	return serverOf(vars), nil
+}
+
+// server is what binwave needs to know of the source server besides its settings.
+type server struct {
+	version serverVersion
+	percona bool // Percona Server, by its version_comment
+}
+
+// serverOf reads the server from its variables.
+func serverOf(vars map[string]string) server {
 	v, _ := parseVersion(vars["version"])
-	return v, nil
+	return server{version: v, percona: strings.Contains(strings.ToLower(vars["version_comment"]), "percona")}
 }
