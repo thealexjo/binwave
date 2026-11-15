@@ -46,8 +46,10 @@ container="$(docker run -d --network none --read-only \
 	-v "$root/deploy/config.example.yaml:/etc/binwave/config.yaml:ro" \
 	-v "$volume:/var/lib/binwave" \
 	"$image" run)"
+# served reads the whole log before it searches it: under pipefail, docker logs | grep -q can fail on SIGPIPE.
+served() { local logs; logs="$(docker logs "$container" 2>&1)"; grep -q 'control channel is served' <<<"$logs"; }
 for _ in $(seq 1 30); do
-	if docker logs "$container" 2>&1 | grep -q 'control channel is served'; then
+	if served; then
 		break
 	fi
 	if [[ "$(docker inspect -f '{{.State.Running}}' "$container")" != "true" ]]; then
@@ -55,7 +57,7 @@ for _ in $(seq 1 30); do
 	fi
 	sleep 1
 done
-if ! docker logs "$container" 2>&1 | grep -q 'control channel is served'; then
+if ! served; then
 	echo "binwave run did not serve its control socket on a new volume:" >&2
 	docker logs "$container" >&2
 	exit 1
