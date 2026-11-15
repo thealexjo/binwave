@@ -14,6 +14,7 @@ import (
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/control"
 	"github.com/thealexjo/binwave/internal/failure"
+	"github.com/thealexjo/binwave/internal/observability"
 	"github.com/thealexjo/binwave/internal/pipeline"
 )
 
@@ -153,5 +154,21 @@ func TestTheDefaultSocketWithoutItsDirectoryLeavesTheChannelOff(t *testing.T) {
 	defer stop()
 	if _, err := (control.Client{Socket: served}).Quarantined(context.Background()); errors.Is(err, control.ErrNotRunning) {
 		t.Errorf("the socket that is set is not served: %v", err)
+	}
+}
+
+// TestPauseOfAFailedServiceKeepsItFailed: the status and binwave_replication_failed must go on
+// showing the failure the operator has to look at.
+func TestPauseOfAFailedServiceKeepsItFailed(t *testing.T) {
+	f := failure.Failure{Kind: failure.KindDDL, GTID: "6d4d8f60-1111-2222-3333-444455556666:5"}
+	b, _ := backendWith(t, false, &f)
+	b.e.hub = observability.NewHub(observability.Options{})
+	b.e.hub.Failed(f)
+
+	if err := b.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st := b.e.hub.Status(); st.State != observability.StateFailed || st.Failure == nil {
+		t.Errorf("state %s after a pause, want the failure kept", st.State)
 	}
 }

@@ -28,8 +28,12 @@ func (b *controlBackend) Pause(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := a.repl.Pause(ctx); err != nil {
+	paused, err := a.repl.Pause(ctx)
+	if err != nil {
 		return fmt.Errorf("pause replication: %w", err)
+	}
+	if !paused {
+		return nil // paused or failed already: the state stays what it is
 	}
 	if b.e.hub != nil {
 		b.e.hub.Paused()

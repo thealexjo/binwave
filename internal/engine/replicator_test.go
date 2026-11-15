@@ -61,7 +61,7 @@ func TestPauseStopsThePipelineAndResumeStartsItAgain(t *testing.T) {
 	done := runLoop(ctx, r, s)
 	s.waitRunning(t)
 
-	if err := r.Pause(ctx); err != nil {
+	if _, err := r.Pause(ctx); err != nil {
 		t.Fatalf("Pause() = %v", err)
 	}
 	if st := r.State(); !st.Paused || st.Since.IsZero() {
@@ -103,10 +103,10 @@ func TestPausingTwiceAndResumingARunningServiceAreHarmless(t *testing.T) {
 	s.waitRunning(t)
 
 	r.Resume(control.ResumeRequest{}) // not paused: nothing happens
-	if err := r.Pause(ctx); err != nil {
+	if _, err := r.Pause(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Pause(ctx); err != nil {
+	if _, err := r.Pause(ctx); err != nil {
 		t.Errorf("the second Pause() = %v, want it to do nothing", err)
 	}
 	if s.runs.Load() != 1 {
@@ -164,7 +164,7 @@ func TestAPipelineThatCannotStopCleanlyFailsTheService(t *testing.T) {
 	done := runLoop(ctx, r, s)
 	s.waitRunning(t)
 
-	pauseErr := r.Pause(ctx)
+	_, pauseErr := r.Pause(ctx)
 
 	if !errors.Is(pauseErr, errServiceStopped) {
 		t.Errorf("Pause() = %v, want the report that the service stopped", pauseErr)
@@ -267,7 +267,7 @@ func TestFailureStopsThePipelineAndTheServiceWaitsForTheOperator(t *testing.T) {
 		t.Fatalf("the loop ended with %v: a failure must not end the process", err)
 	case <-time.After(50 * time.Millisecond):
 	}
-	if err := r.Pause(ctx); err != nil {
+	if _, err := r.Pause(ctx); err != nil {
 		t.Errorf("Pause() of a failed service = %v, want it to do nothing", err)
 	}
 
@@ -329,5 +329,83 @@ func TestWorkWhilePausedHoldsAResumeBack(t *testing.T) {
 	})
 	if ran || err != nil {
 		t.Errorf("whilePaused() while running = %v, %v, want nothing done", ran, err)
+	}
+}
+
+// TestAResumeLeftOverFromARaceDoesNotEndTheNextPause: two resumes can both find replication paused,
+// and the second leaves its signal behind; the next pause must still wait for an operator.
+func TestAResumeLeftOverFromARaceDoesNotEndTheNextPause(t *testing.T) {
+	r, _ := testReplicator(false)
+	s := newStub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runLoop(ctx, r, s)
+	s.waitRunning(t)
+
+	r.resume <- struct{}{} // what the second resume of the race leaves
+	if _, err := r.Pause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if !r.State().Paused || s.runs.Load() != 1 {
+		t.Errorf("paused %v after %d runs: the pause ended without a resume", r.State().Paused, s.runs.Load())
+	}
+}
+
+// TestAPauseThatAFailureStopsFirstDoesNotHideIt: replication that is failed, or fails while a pause
+// waits, is not paused by the operator, so the caller must not report it paused.
+func TestAPauseThatAFailureStopsFirstDoesNotHideIt(t *testing.T) {
+	r, seen := failureReplicator()
+	s := &failingStub{reqs: make(chan control.ResumeRequest, 8), err: errData}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.loop(ctx, s.run) }()
+	<-s.reqs
+	waitFor(t, "the failure", func() bool { return seen() > 0 })
+
+	paused, err := r.Pause(ctx)
+	if err != nil || paused {
+		t.Errorf("Pause() of a failed service = %v, %v, want it to report that it paused nothing", paused, err)
+	}
+}
+
+// slowStub stops only when release is closed, as a pipeline in its final flush does.
+type slowStub struct {
+	pipelineStub
+	release chan struct{}
+}
+
+func (s *slowStub) run(ctx context.Context, _ control.ResumeRequest) error {
+	s.runs.Add(1)
+	s.running <- struct{}{}
+	<-ctx.Done()
+	<-s.release
+	return nil
+}
+
+// TestAResumeDuringAPauseInProgressEndsThePauseCall: the pause was cancelled, so the call waiting for
+// it returns and says so, instead of waiting for a pause that never comes.
+func TestAResumeDuringAPauseInProgressEndsThePauseCall(t *testing.T) {
+	r, _ := testReplicator(false)
+	s := &slowStub{pipelineStub: pipelineStub{running: make(chan struct{}, 8)}, release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.loop(ctx, s.run) }()
+	s.waitRunning(t)
+
+	pctx, pcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer pcancel()
+	result := make(chan error, 1)
+	go func() { _, err := r.Pause(pctx); result <- err }()
+	waitFor(t, "the pause to be asked for", func() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.pauseRequested })
+	r.Resume(control.ResumeRequest{})
+	close(s.release)
+
+	if err := <-result; !errors.Is(err, errPauseCancelled) {
+		t.Errorf("Pause() = %v, want it cancelled by the resume", err)
+	}
+	s.waitRunning(t)
+	if r.State().Paused {
+		t.Error("paused, though the pause was cancelled")
 	}
 }

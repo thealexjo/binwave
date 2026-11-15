@@ -17,6 +17,9 @@ var errPaused = errors.New("replication paused")
 // errServiceStopped is returned to a caller that waits for a pause the service ends before.
 var errServiceStopped = errors.New("the service stopped")
 
+// errPauseCancelled is returned to a caller that waits for a pause a resume cancels before it takes effect.
+var errPauseCancelled = errors.New("the pause was cancelled by a resume")
+
 // pausedTick is how often a paused service reports progress: it is alive and waiting, which the
 // watchdog and /healthz must be able to tell from a hang.
 const pausedTick = time.Second
@@ -29,6 +32,14 @@ type ReplicationState struct {
 	// Failure is set when the pause is a failure that the operator has to look at.
 	Failure *failure.Failure
 }
+
+// pauseWait is one pause: done is closed when it takes effect, and failed says it is a failure.
+type pauseWait struct {
+	done   chan struct{}
+	failed bool
+}
+
+func newPauseWait() *pauseWait { return &pauseWait{done: make(chan struct{})} }
 
 // replicator runs the replication in a loop that can be paused, like MySQL's STOP REPLICA: a
 // pause stops the pipeline the way a graceful shutdown does (buffers written, position saved,
@@ -54,19 +65,20 @@ type replicator struct {
 	failure        *failure.Failure
 	pending        control.ResumeRequest   // what the resume that ends the wait asked for
 	cancelRun      context.CancelCauseFunc // of the pipeline that runs, nil between runs
-	pausedCh       chan struct{}           // closed when the pause has taken effect
+	pause          *pauseWait              // the pause to come, or the one in effect
+	pauseCancelled chan struct{}           // closed when a resume cancels the pause asked for
 	stopped        chan struct{}           // closed when the loop ends
-	resume         chan struct{}
+	resume         chan struct{}           // wakes the loop up; the state says whether to resume
 }
 
 func newReplicator(startPaused bool, now func() time.Time, onWait func()) *replicator {
 	r := &replicator{
 		now: now, onWait: onWait, tick: pausedTick,
-		pausedCh: make(chan struct{}), stopped: make(chan struct{}), resume: make(chan struct{}, 1),
+		pause: newPauseWait(), stopped: make(chan struct{}), resume: make(chan struct{}, 1),
 	}
 	if startPaused {
 		r.paused, r.since = true, now()
-		close(r.pausedCh)
+		close(r.pause.done)
 	}
 	return r
 }
@@ -89,42 +101,58 @@ func (r *replicator) whilePaused(fn func() error) (bool, error) {
 	return true, fn()
 }
 
-// Pause stops the pipeline and waits until it has stopped. It returns at once when replication is
-// already paused. It fails when the pipeline cannot stop cleanly, which stops the service as any
-// failure of the pipeline does.
-func (r *replicator) Pause(ctx context.Context) error {
+// Pause stops the pipeline and waits until it has stopped. It reports whether this call paused
+// replication: not when it was paused or failed already, nor when a failure stopped it first. It
+// fails when the pipeline cannot stop cleanly, which stops the service as any failure of the
+// pipeline does, and when a resume cancels the pause before it takes effect.
+func (r *replicator) Pause(ctx context.Context) (bool, error) {
 	r.mu.Lock()
 	if r.paused {
 		r.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	r.pauseRequested = true
-	cancel, done := r.cancelRun, r.pausedCh
+	if r.pauseCancelled == nil {
+		r.pauseCancelled = make(chan struct{})
+	}
+	cancel, wait, cancelled := r.cancelRun, r.pause, r.pauseCancelled
 	r.mu.Unlock()
 
 	if cancel != nil {
 		cancel(errPaused)
 	}
 	select {
-	case <-done:
-		return nil
+	case <-wait.done:
+		return !wait.failed, nil
+	case <-cancelled:
+		return false, errPauseCancelled
 	case <-r.stopped:
-		return errServiceStopped
+		return false, errServiceStopped
 	case <-ctx.Done():
-		return fmt.Errorf("wait for the pause: %w", ctx.Err())
+		return false, fmt.Errorf("wait for the pause: %w", ctx.Err())
 	}
 }
 
-// Resume starts replication again. It does nothing when replication is not paused. The request
-// says which transactions to drop; the pipeline is told when it starts.
+// Resume starts replication again. It does nothing when replication is not paused, except cancel a
+// pause that has not taken effect yet. The request says which transactions to drop; the pipeline is
+// told when it starts. The state changes here, under the lock, so that a second resume finds
+// replication running and a pause after it waits for its own resume.
 func (r *replicator) Resume(req control.ResumeRequest) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.paused {
-		r.pauseRequested = false // a pause that has not taken effect yet is cancelled
+		if r.pauseRequested {
+			r.pauseRequested = false
+			close(r.pauseCancelled)
+			r.pauseCancelled = nil
+		}
 		return
 	}
 	r.pending = req
+	r.paused, r.pauseRequested = false, false
+	r.failure = nil
+	r.since = time.Time{}
+	r.pause = newPauseWait()
 	select {
 	case r.resume <- struct{}{}:
 	default:
@@ -145,15 +173,14 @@ func (r *replicator) loop(ctx context.Context, run func(ctx context.Context, req
 		paused := r.paused
 		r.mu.Unlock()
 
-		var req control.ResumeRequest
-		if paused {
-			if !r.waitForResume(ctx) {
-				return nil // asked to stop while paused: nothing is running, nothing to flush
-			}
-			r.mu.Lock()
-			req, r.pending = r.pending, control.ResumeRequest{}
-			r.mu.Unlock()
+		if paused && !r.waitForResume(ctx) {
+			return nil // asked to stop while paused: nothing is running, nothing to flush
 		}
+		// Taken at every run: a resume may come before the loop waits for it.
+		r.mu.Lock()
+		req := r.pending
+		r.pending = control.ResumeRequest{}
+		r.mu.Unlock()
 
 		rctx, cancel := context.WithCancelCause(ctx)
 		r.mu.Lock()
@@ -192,8 +219,8 @@ func (r *replicator) failureOf(err error) (failure.Failure, bool) {
 func (r *replicator) enterFailed(f failure.Failure) {
 	r.mu.Lock()
 	r.failure = &f
-	r.pauseRequested = false
 	if !r.paused {
+		r.pause.failed = true
 		r.enterPause()
 	}
 	r.mu.Unlock()
@@ -205,7 +232,8 @@ func (r *replicator) enterFailed(f failure.Failure) {
 // enterPause records that the pause has taken effect. mu is held.
 func (r *replicator) enterPause() {
 	r.paused, r.since = true, r.now()
-	close(r.pausedCh)
+	r.pauseRequested, r.pauseCancelled = false, nil
+	close(r.pause.done)
 }
 
 // waitForResume blocks while paused, reporting progress. It returns false when ctx ends first.
@@ -221,12 +249,11 @@ func (r *replicator) waitForResume(ctx context.Context) bool {
 			return false
 		case <-r.resume:
 			r.mu.Lock()
-			r.paused, r.pauseRequested = false, false
-			r.failure = nil
-			r.since = time.Time{}
-			r.pausedCh = make(chan struct{})
+			resumed := !r.paused // a signal left by a resume that found replication running already is not one
 			r.mu.Unlock()
-			return true
+			if resumed {
+				return true
+			}
 		case <-t.C:
 		}
 	}
