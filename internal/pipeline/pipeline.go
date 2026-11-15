@@ -333,6 +333,15 @@ func (p *Pipeline) Run(ctx context.Context, hooks Hooks) error {
 // first run. The configured start is saved before anything is read, so a restart before the
 // first flush resumes from the same point instead of picking a new "now" and skipping data.
 func (p *Pipeline) startPosition(ctx context.Context) (checkpoint.Position, error) {
+	pos, err := p.loadOrDecidePosition(ctx)
+	if err == nil {
+		p.d.Observer.PositionLoaded(pos)
+	}
+	return pos, err
+}
+
+// loadOrDecidePosition is startPosition without telling the observer.
+func (p *Pipeline) loadOrDecidePosition(ctx context.Context) (checkpoint.Position, error) {
 	var (
 		pos   checkpoint.Position
 		found bool

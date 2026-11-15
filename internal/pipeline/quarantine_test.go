@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -658,5 +659,29 @@ func TestATableQuarantinedDuringTheSaveOfTheListIsSavedLater(t *testing.T) {
 		if !p.qChanged.Load() {
 			t.Errorf("save fails %v: the list is marked saved, though it changed during the save or was not saved", saveFails)
 		}
+	}
+}
+
+// TestTheStartPositionIsReportedBeforeAnythingIsRead: a restart on a quiet source, or one that starts
+// paused, shows where it stands without waiting for a save.
+func TestTheStartPositionIsReportedBeforeAnythingIsRead(t *testing.T) {
+	for name, start := range map[string]func(*testing.T, *harness, *Pipeline) error{
+		"run":     func(t *testing.T, h *harness, p *Pipeline) error { return h.runPipeline(t, p) },
+		"prepare": func(t *testing.T, _ *harness, p *Pipeline) error { return p.Prepare(t.Context()) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-7", Version: 70}, true
+			obs := &fakeObserver{}
+			h.obs = obs
+
+			if err := start(t, h, h.pipeline(t)); err != nil {
+				t.Fatal(err)
+			}
+
+			if !slices.Contains(obs.calls, "loaded u:1-7") {
+				t.Errorf("observer calls %v, want the loaded position", obs.calls)
+			}
+		})
 	}
 }

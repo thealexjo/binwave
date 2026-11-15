@@ -236,6 +236,25 @@ func TestStatusReportsPositionLagAndLastError(t *testing.T) {
 	}
 }
 
+// TestTheLoadedPositionIsShownBeforeTheFirstSave: after a restart the status and the metrics say where
+// replication stands, and the initial load has its denominator, before anything is saved again.
+func TestTheLoadedPositionIsShownBeforeTheFirstSave(t *testing.T) {
+	h, _ := newTestHub()
+	h.PositionLoaded(checkpoint.Position{GTIDSet: "u:1-9", Version: 30, LoadTotal: 4})
+	h.ResyncChanged([]snap.Status{{Table: "shop.items", Kind: "initial_load", Reading: true}})
+
+	if st := h.Status(); st.Position != "u:1-9" {
+		t.Errorf("status position = %q, want u:1-9", st.Position)
+	}
+	text := scrape(t, h)
+	if got := value(t, text, "binwave_position_version"); got != "30" {
+		t.Errorf("binwave_position_version = %s, want 30", got)
+	}
+	if got := value(t, text, "binwave_initial_load_covered_tables"); got != "4" {
+		t.Errorf("binwave_initial_load_covered_tables = %s, want 4", got)
+	}
+}
+
 func TestLastErrorIsBoundedAndKeepsValidUTF8(t *testing.T) {
 	h, _ := newTestHub()
 	h.RecordError("startup", errors.New(strings.Repeat("я", 400)))

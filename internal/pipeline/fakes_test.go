@@ -710,7 +710,8 @@ func (o *fakeObserver) PositionSaved(pos checkpoint.Position, applied, open time
 	o.mu.Unlock()
 	o.note("saved %s", pos.GTIDSet)
 }
-func (o *fakeObserver) Idle() { o.note("idle") }
+func (o *fakeObserver) PositionLoaded(pos checkpoint.Position) { o.note("loaded %s", pos.GTIDSet) }
+func (o *fakeObserver) Idle()                                  { o.note("idle") }
 func (o *fakeObserver) Retry(op, reason string, _ error) {
 	o.mu.Lock()
 	o.retries = append(o.retries, reason+" "+op)

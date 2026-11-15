@@ -201,3 +201,36 @@ func TestTablesCommandsWorkOnARunningServiceThroughTheControlChannel(t *testing.
 	waitUntil(t, "the released table to replicate", 60*time.Second, func() bool { return chRowCount(t, ch, "later") == 2 })
 	e.stillRunning(t)
 }
+
+// TestARestartShowsTheSavedPositionOnAQuietSource: after a restart the status says where replication
+// stands, whether it runs or starts paused, without waiting for a change of the source to be saved.
+func TestARestartShowsTheSavedPositionOnAQuietSource(t *testing.T) {
+	t.Parallel()
+	my := testenv.StartMySQL(t)
+	ch := testenv.StartClickHouse(t)
+	mustExec(t, my, "CREATE TABLE binwave.acct (id INT PRIMARY KEY, owner VARCHAR(20) NOT NULL, qty INT NOT NULL)")
+	cfg := engineConfig(t, my, ch, "file")
+	cfg.Control.Socket = shortSocket(t)
+
+	e := startHubEngine(t, cfg)
+	mustExec(t, my, "INSERT INTO binwave.acct VALUES (1, 'a', 1)")
+	waitForConvergence(t, my, ch)
+	if err := e.stop(); err != nil {
+		t.Fatalf("graceful stop returned %v", err)
+	}
+	saved := loadPosition(t, ch, cfg)
+
+	for _, autostart := range []bool{true, false} {
+		cfg.Replication.Autostart = &autostart
+		e := startHubEngine(t, cfg)
+		if got := e.hub.Status().Position; got != saved.GTIDSet {
+			t.Errorf("autostart %v: status position = %q, want the saved %q", autostart, got, saved.GTIDSet)
+		}
+		if got := metricValue(t, e.hub, "binwave_position_version"); got != float64(saved.Version) {
+			t.Errorf("autostart %v: binwave_position_version = %v, want %d", autostart, got, saved.Version)
+		}
+		if err := e.stop(); err != nil {
+			t.Fatalf("autostart %v: graceful stop returned %v", autostart, err)
+		}
+	}
+}

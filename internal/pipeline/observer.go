@@ -32,6 +32,8 @@ type Observer interface {
 	// the last transaction the position covers; open is when it committed the transaction that is
 	// still being read (zero if none), whose rows may already be written but not covered.
 	PositionSaved(pos checkpoint.Position, applied, open time.Time)
+	// PositionLoaded is called with the position replication starts from, saved before or decided now.
+	PositionLoaded(pos checkpoint.Position)
 	// Idle is called when the source had nothing to send and everything read is written and saved.
 	Idle()
 	// Retry is called when a ClickHouse request failed and is going to be retried. reason is
@@ -86,6 +88,7 @@ func (nopObserver) RowsRead(string, int)                                    {}
 func (nopObserver) BufferChanged(int, int)                                  {}
 func (nopObserver) Inserted(string, int, time.Duration)                     {}
 func (nopObserver) PositionSaved(checkpoint.Position, time.Time, time.Time) {}
+func (nopObserver) PositionLoaded(checkpoint.Position)                      {}
 func (nopObserver) Idle()                                                   {}
 func (nopObserver) Retry(string, string, error)                             {}
 func (nopObserver) SourceRetry(string, error)                               {}

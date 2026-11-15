@@ -516,6 +516,14 @@ func (h *Hub) PositionSaved(pos checkpoint.Position, applied, open time.Time) {
 	h.mu.Unlock()
 }
 
+// PositionLoaded implements pipeline.Observer. When the position was saved, and when the source
+// committed what it covers, is not known until the next save.
+func (h *Hub) PositionLoaded(pos checkpoint.Position) {
+	h.mu.Lock()
+	h.position = pos
+	h.mu.Unlock()
+}
+
 // Idle implements pipeline.Observer.
 func (h *Hub) Idle() {
 	h.mu.Lock()
