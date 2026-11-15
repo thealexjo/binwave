@@ -224,8 +224,8 @@ func (c *Client) verify(ctx context.Context, t *Table) error {
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(engine, "ReplacingMergeTree") {
-		problems = append(problems, fmt.Sprintf("engine is %s, expected ReplacingMergeTree", engine))
+	if !isBinwaveEngine(engine) {
+		problems = append(problems, fmt.Sprintf("engine is %s, expected %s", engineCall(engine), binwaveEngine))
 	}
 	if want := strings.Join(t.OrderBy, ","); normalizeKey(sortingKey) != want {
 		problems = append(problems, fmt.Sprintf("sort key is (%s), expected (%s)", sortingKey, want))
@@ -269,8 +269,34 @@ func (c *Client) columns(ctx context.Context, database, table string) (map[strin
 	return cols, nil
 }
 
+// binwaveEngine is the engine of every table binwave writes, with the arguments FINAL depends on.
+var binwaveEngine = "ReplacingMergeTree(" + ColVersion + ", " + ColIsDeleted + ")"
+
+// engineCall returns the engine and its arguments from engine_full, without the clauses after them.
+func engineCall(engineFull string) string {
+	full := strings.TrimSpace(engineFull)
+	open := strings.IndexByte(full, '(')
+	if space := strings.IndexByte(full, ' '); open < 0 || (space >= 0 && space < open) {
+		if space < 0 {
+			return full
+		}
+		return full[:space]
+	}
+	if end := strings.IndexByte(full[open:], ')'); end >= 0 {
+		return full[:open+end+1]
+	}
+	return full
+}
+
+// isBinwaveEngine reports whether engine_full is ReplacingMergeTree(_version, _is_deleted).
+func isBinwaveEngine(engineFull string) bool {
+	plain := strings.NewReplacer("`", "", "\"", "", " ", "").Replace(engineCall(engineFull))
+	return plain == strings.ReplaceAll(binwaveEngine, " ", "")
+}
+
+// tableInfo returns engine_full and the sorting key of a table.
 func (c *Client) tableInfo(ctx context.Context, database, table string) (engine, sortingKey string, err error) {
-	row := c.conn.QueryRow(ctx, "SELECT engine, sorting_key FROM system.tables WHERE database = ? AND name = ?", database, table)
+	row := c.conn.QueryRow(ctx, "SELECT engine_full, sorting_key FROM system.tables WHERE database = ? AND name = ?", database, table)
 	if err := row.Scan(&engine, &sortingKey); err != nil {
 		return "", "", fmt.Errorf("read table info of %s.%s: %w", database, table, err)
 	}

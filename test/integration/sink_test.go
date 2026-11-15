@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -112,6 +113,34 @@ func TestEnsureReportsAMismatchAndLeavesTheTableAlone(t *testing.T) {
 	var n uint64
 	if err := ch.DB.QueryRow("SELECT count() FROM replica.kv").Scan(&n); err != nil || n != 1 {
 		t.Errorf("the existing table was modified: count = %d, err = %v", n, err)
+	}
+}
+
+// TestEnsureRefusesAReplacingMergeTreeWithOtherArguments: without _version as the version and
+// _is_deleted as the deleted flag, FINAL keeps the wrong version of a row and shows deleted rows.
+func TestEnsureRefusesAReplacingMergeTreeWithOtherArguments(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	sink := openSink(t, ch)
+	tbl := resolveTable(t, kvTable(), nil)
+	execCH(t, ch, "CREATE DATABASE replica")
+	for i, engine := range []string{"ReplacingMergeTree()", "ReplacingMergeTree(_version)", "ReplacingMergeTree(_synced_at, _is_deleted)"} {
+		name := fmt.Sprintf("kv%d", i)
+		create := strings.Replace(tbl.CreateStatement(), "`kv`", "`"+name+"`", 1)
+		create = strings.Replace(create, "ReplacingMergeTree(`_version`, `_is_deleted`)", engine, 1)
+		execCH(t, ch, create)
+		other := *tbl
+		other.Name = name
+
+		err := sink.Ensure(context.Background(), &other, additive)
+
+		var mismatch *chsink.SchemaMismatchError
+		if !errors.As(err, &mismatch) || !strings.Contains(strings.Join(mismatch.Problems, "\n"), "expected ReplacingMergeTree(_version, _is_deleted)") {
+			t.Errorf("Ensure() of a table with %s = %v, want a mismatch of the engine", engine, err)
+		}
+	}
+	if err := sink.Ensure(context.Background(), tbl, additive); err != nil {
+		t.Errorf("Ensure() of the table binwave creates = %v", err)
 	}
 }
 
