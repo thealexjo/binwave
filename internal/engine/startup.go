@@ -79,6 +79,17 @@ func (e *Engine) retryStartup(ctx context.Context, hooks app.Hooks, attempt func
 		stop()
 		cancel()
 
+		// An attempt the budget cut off has failed, whatever it returned: a pipeline waiting for its
+		// first event takes the cancellation for a graceful stop and returns nil.
+		if state.Load() == attemptExpired && ctx.Err() == nil {
+			if e.hub != nil && err != nil {
+				e.hub.StartupFailed(err)
+			}
+			if err == nil {
+				return fmt.Errorf("the service did not start within retry.startup_budget (%s, %d attempts)", budget, n)
+			}
+			return fmt.Errorf("the service did not start within retry.startup_budget (%s, %d attempts): %w", budget, n, err)
+		}
 		var cfgErr *app.ConfigError
 		switch {
 		case err == nil, state.Load() == attemptReady, ctx.Err() != nil, errors.As(err, &cfgErr):
@@ -89,7 +100,7 @@ func (e *Engine) retryStartup(ctx context.Context, hooks app.Hooks, attempt func
 			e.hub.StartupFailed(err)
 		}
 		elapsed := e.clock.now().Sub(began)
-		if state.Load() == attemptExpired || elapsed+delay >= budget {
+		if elapsed+delay >= budget {
 			return fmt.Errorf("the service did not start within retry.startup_budget (%s, %d attempts): %w",
 				budget, n, err)
 		}

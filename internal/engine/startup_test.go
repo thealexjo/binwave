@@ -180,6 +180,34 @@ func TestStartupCutsAnAttemptThatHangsPastTheBudget(t *testing.T) {
 	}
 }
 
+// TestStartupFailsWhenAnAttemptCutByTheBudgetReturnsNil: a pipeline waiting for its first event
+// takes the cancellation for a graceful stop and returns nil; the budget still ran out, so the
+// process must fail and be restarted, not exit 0.
+func TestStartupFailsWhenAnAttemptCutByTheBudgetReturnsNil(t *testing.T) {
+	e, fc := startupEngine(time.Minute)
+	entered := make(chan struct{})
+	done := make(chan error, 1)
+
+	go func() {
+		done <- e.retryStartup(context.Background(), app.Hooks{}, func(ctx context.Context, _ app.Hooks) error {
+			close(entered)
+			<-ctx.Done()
+			return nil
+		})
+	}()
+	<-entered
+	fc.fire()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "retry.startup_budget") {
+			t.Errorf("err = %v, want the budget error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attempt was not cut off")
+	}
+}
+
 func TestStartupStopsWhenTheProcessIsAskedToStop(t *testing.T) {
 	e, _ := startupEngine(10 * time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
