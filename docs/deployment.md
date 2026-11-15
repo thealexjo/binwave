@@ -180,9 +180,19 @@ useradd --system --no-create-home --shell /usr/sbin/nologin binwave
 install -m 0644 deploy/systemd/binwave.service /etc/systemd/system/
 install -d -o root -g binwave -m 0750 /etc/binwave
 install -m 0640 -o root -g binwave binwave.yaml /etc/binwave/config.yaml   # the file from step 5
+install -m 0600 -o root -g root /dev/null /etc/binwave/config.env          # the secrets, below
 
 systemctl daemon-reload
 ```
+
+A service gets no environment from the shell that started it: the variables the config refers to as `${NAME}` go into `/etc/binwave/config.env` (for the template, `/etc/binwave/<instance>.env`), one `NAME=value` per line, which the unit loads with `EnvironmentFile=`:
+
+```bash
+BINWAVE_MYSQL_PASSWORD=...
+BINWAVE_CLICKHOUSE_PASSWORD=...
+```
+
+systemd reads the file as root before it starts binwave, so only root needs to read it.
 
 Do not start it right away — check first (step 7).
 
@@ -194,6 +204,8 @@ docker pull ghcr.io/thealexjo/binwave:0.1   # or build it from the source: make 
 
 The config is mounted as a file at `/etc/binwave/config.yaml`; secrets come through environment variables, which the config substitutes itself as `${ENV}`. A compose example is `deploy/docker/compose.example.yaml`. The image is distroless, non-root, without a shell — CLI commands (`replication status` and the like) run through `docker exec` with the same binary inside the container.
 
+The state directory `/var/lib/binwave` must be writable by the user of the image (UID `65532`): a named volume gets the owner from the image, a directory mounted from the host needs `chown 65532:65532`.
+
 Both options have the same contract: a foreground process, logs only to stdout, `SIGTERM` — graceful shutdown, exit code `78` — configuration error.
 
 ## 7. Checking before the start
@@ -201,6 +213,7 @@ Both options have the same contract: a foreground process, logs only to stdout, 
 Without changing anything in the databases — the same thing the service does at start and right after it:
 
 ```bash
+set -a; . /etc/binwave/config.env; set +a   # with Option A: the secrets of the service, as root
 binwave check --print     # config validation, secrets masked
 binwave check --connect   # + connections, source requirements, privileges, table checks
 ```

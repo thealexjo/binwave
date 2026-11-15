@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Smoke-tests the Docker image: it runs as non-root, reports its version and validates
-# the example config with secrets passed through the environment.
+# Smoke-tests the Docker image: it runs as non-root, reports its version, validates
+# the example config with secrets passed through the environment, and starts on a new volume.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,6 +28,36 @@ code=$?
 set -e
 if [[ "$code" != "78" ]]; then
 	echo "missing secrets must exit with 78 (EX_CONFIG), got $code" >&2
+	exit 1
+fi
+
+# binwave run creates its control socket in the state directory before it connects anywhere,
+# so a new named volume must be writable by the user of the image. No network: nothing is reached.
+volume="binwave-verify-$$"
+container=""
+cleanup() {
+	if [[ -n "$container" ]]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
+	docker volume rm -f "$volume" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+container="$(docker run -d --network none --read-only \
+	-e BINWAVE_MYSQL_PASSWORD=x \
+	-e BINWAVE_CLICKHOUSE_PASSWORD=y \
+	-v "$root/deploy/config.example.yaml:/etc/binwave/config.yaml:ro" \
+	-v "$volume:/var/lib/binwave" \
+	"$image" run)"
+for _ in $(seq 1 30); do
+	if docker logs "$container" 2>&1 | grep -q 'control channel is served'; then
+		break
+	fi
+	if [[ "$(docker inspect -f '{{.State.Running}}' "$container")" != "true" ]]; then
+		break
+	fi
+	sleep 1
+done
+if ! docker logs "$container" 2>&1 | grep -q 'control channel is served'; then
+	echo "binwave run did not serve its control socket on a new volume:" >&2
+	docker logs "$container" >&2
 	exit 1
 fi
 
