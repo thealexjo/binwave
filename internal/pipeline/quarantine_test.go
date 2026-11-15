@@ -508,7 +508,7 @@ func TestPrepareFixesTheStartPointBeforeThePauseEnds(t *testing.T) {
 
 func TestIdleQuarantineListCanBeLoadedChangedAndSaved(t *testing.T) {
 	h := newHarness(t)
-	h.store.pos = checkpoint.Position{GTIDSet: "u:1-7", Version: 70, Quarantine: checkpoint.EncodeQuarantine([]checkpoint.Quarantined{{Table: "shop.items", Reason: "r"}})}
+	h.store.pos = checkpoint.Position{Tables: "{}", GTIDSet: "u:1-7", Version: 70, Quarantine: checkpoint.EncodeQuarantine([]checkpoint.Quarantined{{Table: "shop.items", Reason: "r"}})}
 	h.store.found = true
 	p := h.pipeline(t)
 	ctx := t.Context()
@@ -635,7 +635,7 @@ func TestAGuardProblemUnderStopEndsTheServiceRatherThanFailingReplication(t *tes
 func TestATableQuarantinedDuringTheSaveOfTheListIsSavedLater(t *testing.T) {
 	for _, saveFails := range []bool{false, true} {
 		h := newHarness(t)
-		h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-7", Version: 70}, true
+		h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: "u:1-7", Version: 70}, true
 		p := h.pipeline(t)
 		ctx := t.Context()
 		if err := p.Prepare(ctx); err != nil {
@@ -671,7 +671,7 @@ func TestTheStartPositionIsReportedBeforeAnythingIsRead(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
-			h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-7", Version: 70}, true
+			h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: "u:1-7", Version: 70}, true
 			obs := &fakeObserver{}
 			h.obs = obs
 

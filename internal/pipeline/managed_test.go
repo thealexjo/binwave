@@ -1,12 +1,13 @@
 package pipeline
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/thealexjo/binwave/internal/checkpoint"
 	"github.com/thealexjo/binwave/internal/config"
-	"github.com/thealexjo/binwave/internal/schema"
 )
 
 func savedTables(t *testing.T, h *harness) map[string]checkpoint.Target {
@@ -18,55 +19,30 @@ func savedTables(t *testing.T, h *harness) map[string]checkpoint.Target {
 	return tables
 }
 
-// TestAPositionWithoutAListAdoptsTheTablesBinwaveWrote: a position saved by a version that kept no
-// list means replication has been running, so the targets of replicated source tables that have
-// binwave's shape are binwave's. Nothing else is: not a table of the shape without a source table,
-// not a target that does not have the shape.
-func TestAPositionWithoutAListAdoptsTheTablesBinwaveWrote(t *testing.T) {
+// TestAPositionWithoutAListIsRefused: a position saved by a pre-release that kept no list of tables
+// stops the start, before anything is read or written: which tables it wrote cannot be told.
+func TestAPositionWithoutAListIsRefused(t *testing.T) {
 	h := newHarness(t)
-	h.cfg.Tables.Overrides = map[string]config.TableOverride{"shop.renamed": {TargetTable: "goods"}}
 	h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-0"}, true
-	h.snapshot = &fakeSnapshot{catalog: []schema.CatalogTable{
-		{Database: "shop", Name: "items"},
-		{Database: "shop", Name: "renamed"},
-		{Database: "shop", Name: "plain"},
-		{Database: "warehouse", Name: "stock"}, // not replicated
-	}}
-	h.sink.tablesOf = map[string][]string{"shop": {"items", "goods", "stray"}, "warehouse": {"stock"}}
 	h.source.script = []scriptedTx{tx(1, ddlEvent("DROP DATABASE shop"))}
 
-	if err := h.run(t); err != nil {
-		t.Fatal(err)
+	err := h.run(t)
+
+	if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "pre-release") {
+		t.Fatalf("run() = %v, want ErrUnsupported about a pre-release position", err)
 	}
-	if got, want := droppedTables(h), []string{"shop.items", "shop.goods"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("dropped %v, want %v", got, want)
+	if got := droppedTables(h); len(got) != 0 {
+		t.Errorf("dropped %v, want nothing", got)
 	}
-	if got := savedTables(t, h); len(got) != 0 {
-		t.Errorf("saved list %v, want the dropped tables gone from it", got)
+	if got := h.store.all(); len(got) != 0 {
+		t.Errorf("saved %v, want nothing", got)
 	}
 }
 
-func TestTheListAdoptedIsSaved(t *testing.T) {
+// TestANewInstallationStartsWithAnEmptyList: without a saved position nothing has been replicated, so
+// a table of binwave's shape that is there already is not binwave's.
+func TestANewInstallationStartsWithAnEmptyList(t *testing.T) {
 	h := newHarness(t)
-	h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-0"}, true
-	h.snapshot = &fakeSnapshot{}
-	h.sink.tablesOf = map[string][]string{"shop": {"items"}}
-	h.source.script = []scriptedTx{tx(1)}
-
-	if err := h.run(t); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := savedTables(t, h), map[string]checkpoint.Target{"shop.items": {Database: "shop", Table: "items"}}; !reflect.DeepEqual(got, want) {
-		t.Errorf("saved list %v, want %v", got, want)
-	}
-}
-
-// TestANewInstallationAdoptsNothing: without a saved position nothing has been replicated, so a table
-// of binwave's shape that is there already is not binwave's.
-func TestANewInstallationAdoptsNothing(t *testing.T) {
-	h := newHarness(t)
-	h.snapshot = &fakeSnapshot{}
-	h.sink.tablesOf = map[string][]string{"shop": {"items"}}
 	h.source.script = []scriptedTx{tx(1)}
 
 	if err := h.run(t); err != nil {

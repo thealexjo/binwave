@@ -90,7 +90,7 @@ func TestWithStopADamagedWatermarkStopsReplication(t *testing.T) {
 		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Rows: 1,
 		Done: true, Final: "not a GTID set",
 	}})
-	h.store.pos, h.store.found = checkpoint.Position{GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
 	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
 	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
 

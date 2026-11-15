@@ -155,26 +155,26 @@ func TestDropDatabaseOfARealServerDropsTheReplicatedTables(t *testing.T) {
 	e.stillRunning(t)
 }
 
-// TestAnUpgradeAdoptsTheTablesBinwaveWrote: a position saved by a version that kept no list of tables
-// gets one at the first start, of the tables binwave wrote: DROP DATABASE drops them, and leaves a
-// table of binwave's shape without a source table and a target that is not of binwave's shape.
-func TestAnUpgradeAdoptsTheTablesBinwaveWrote(t *testing.T) {
+// TestAPositionOfAPreReleaseIsRefused: a position saved by a pre-release that kept no list of tables
+// stops the start with the configuration code, before anything is read: which ClickHouse tables it
+// wrote cannot be told, and a DROP DATABASE replayed later would leave them or take another's.
+func TestAPositionOfAPreReleaseIsRefused(t *testing.T) {
 	t.Parallel()
 	my := testenv.StartMySQL(t)
 	ch := testenv.StartClickHouse(t)
 	createSourceDatabase(t, my, "other")
-	mustExec(t, my, "CREATE TABLE other.t (id INT PRIMARY KEY)", "CREATE TABLE other.u (id INT PRIMARY KEY)", "CREATE TABLE other.v (id INT PRIMARY KEY)")
-	cfg := engineConfigWith(t, my, ch, "file", `tables: {include: ["other.t", "other.u", "other.v"]}`)
+	mustExec(t, my, "CREATE TABLE other.t (id INT PRIMARY KEY)")
+	cfg := engineConfigWith(t, my, ch, "file", `tables: {include: ["other.t"]}`)
 	cfg.Tables.TargetDatabase = ""
 	cfg.DDL.Mode = config.DDLFull
 	e := startEngine(t, cfg)
-	mustExec(t, my, "INSERT INTO other.t VALUES (1)", "INSERT INTO other.u VALUES (1)")
-	waitUntil(t, "the rows", 60*time.Second, func() bool { return chCount(t, ch, "other.t") == 1 && chCount(t, ch, "other.u") == 1 })
+	mustExec(t, my, "INSERT INTO other.t VALUES (1)")
+	waitUntil(t, "the rows", 60*time.Second, func() bool { return chCount(t, ch, "other.t") == 1 })
 	if err := e.stop(t); err != nil {
 		t.Fatal(err)
 	}
 
-	// The state an earlier version saved: the position, no list of tables.
+	// The state a pre-release saved: the position, no list of tables.
 	data, err := os.ReadFile(cfg.Checkpoint.FilePath)
 	if err != nil {
 		t.Fatal(err)
@@ -193,18 +193,18 @@ func TestAnUpgradeAdoptsTheTablesBinwaveWrote(t *testing.T) {
 	if err := os.WriteFile(cfg.Checkpoint.FilePath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	execCH(t, ch, "CREATE TABLE other.stray AS other.t", "CREATE TABLE other.v (id Int32, _version UInt64, _is_deleted UInt8) ENGINE = MergeTree ORDER BY id")
+	mustExec(t, my, "INSERT INTO other.t VALUES (2)")
 
-	e = startEngine(t, cfg)
-	mustExec(t, my, "DROP DATABASE other")
-	waitUntil(t, "the tables binwave wrote to go", 60*time.Second, func() bool {
-		return chCount(t, ch, "other.t") == -1 && chCount(t, ch, "other.u") == -1
-	})
-	if !chExists(t, ch, "other", "stray") || !chExists(t, ch, "other", "v") {
-		t.Error("DROP DATABASE dropped a table binwave never wrote to")
+	ready, running, err := runUntilItEnds(t, cfg, 60*time.Second)
+	if ready || running {
+		t.Errorf("ready %v, running %v: the start must be refused", ready, running)
 	}
-	if err := e.stop(t); err != nil {
-		t.Errorf("graceful stop returned %v", err)
+	requireConfigError(t, err, "pre-release")
+	if n := chCount(t, ch, "other.t"); n != 1 {
+		t.Errorf("other.t has %d rows, want the 1 written before: nothing is read", n)
+	}
+	if saved, err := os.ReadFile(cfg.Checkpoint.FilePath); err != nil || string(saved) != string(data) {
+		t.Errorf("the saved state changed: %s (%v)", saved, err)
 	}
 }
 

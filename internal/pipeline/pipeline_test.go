@@ -667,7 +667,7 @@ func TestStartPosition(t *testing.T) {
 		h := newHarness(t)
 		h.cfg.Replication.InitialPosition = config.StartFromGTID
 		h.cfg.Replication.GTID = "u:1-7"
-		h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-3", Version: 5}, true
+		h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: "u:1-3", Version: 5}, true
 		h.source.script = []scriptedTx{tx(4)}
 
 		if err := h.run(t); err != nil {
@@ -682,7 +682,7 @@ func TestStartPosition(t *testing.T) {
 		h := newHarness(t)
 		// A previous run wrote versions far ahead of this transaction's timestamp.
 		saved := uint64(epoch.Add(24*time.Hour).UnixMicro()) << 12
-		h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-3", Version: saved}, true
+		h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: "u:1-3", Version: saved}, true
 		h.source.script = []scriptedTx{tx(4, insertRows(itemsTable(), 1, "a"))}
 		h.eagerFlush()
 

@@ -173,8 +173,6 @@ func TestDropDatabaseDropsTheTablesThatWereReplicated(t *testing.T) {
 		h.cfg.Tables.Overrides = map[string]config.TableOverride{"shop.renamed": {TargetTable: "goods"}}
 		renamed := itemsTable()
 		renamed.Name = "renamed"
-		// A table of binwave's shape that binwave never wrote to is not in the list.
-		h.sink.tablesOf = map[string][]string{"shop": {"items", "goods", "unselected"}}
 		h.source.script = []scriptedTx{
 			tx(1, insertRows(itemsTable(), 1, "a"), insertRows(renamed, 1, "a")),
 			tx(2, ddlEvent("DROP DATABASE shop")),
@@ -211,11 +209,10 @@ func TestDropDatabaseDropsTheTablesThatWereReplicated(t *testing.T) {
 	})
 }
 
-// TestDropDatabaseLeavesATableBinwaveNeverWroteTo: a table of binwave's shape, under the name a
-// replicated table of the dropped database would have, is still not binwave's.
+// TestDropDatabaseLeavesATableBinwaveNeverWroteTo: a table under the name a replicated table of the
+// dropped database would have is not binwave's unless binwave wrote to it.
 func TestDropDatabaseLeavesATableBinwaveNeverWroteTo(t *testing.T) {
 	h := newHarness(t)
-	h.sink.tablesOf = map[string][]string{"shop": {"items"}}
 	h.source.script = []scriptedTx{tx(1, ddlEvent("DROP DATABASE shop"))}
 
 	if err := h.run(t); err != nil {
@@ -236,7 +233,6 @@ func droppedTables(h *harness) []string {
 
 func TestDropDatabaseThatIsNotReplicatedIsIgnored(t *testing.T) {
 	h := newHarness(t)
-	h.sink.tablesOf = map[string][]string{"warehouse": {"invoices"}}
 	h.source.script = []scriptedTx{tx(1, event.DDL{Database: "warehouse", Query: "DROP DATABASE warehouse"})}
 
 	if err := h.run(t); err != nil {

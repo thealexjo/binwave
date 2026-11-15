@@ -129,7 +129,7 @@ func TestAResyncContinuedAfterARestartWaitsForTheSource(t *testing.T) {
 	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
 		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Cursor: cursor, Rows: 1,
 	}})
-	h.store.pos, h.store.found = checkpoint.Position{GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
 	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
 	h.sink.tables["shop.items__resync"] = map[string]cell{"1|": {version: 1, values: []any{int64(1), "a"}}}
 	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 3, "c"))}

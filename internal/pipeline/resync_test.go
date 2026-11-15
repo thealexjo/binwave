@@ -299,7 +299,7 @@ func TestResyncContinuesFromTheSavedCursorAfterARestart(t *testing.T) {
 	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
 		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Cursor: cursor, Rows: 2,
 	}})
-	h.store.pos, h.store.found = checkpoint.Position{GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
 	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
 	// What the first process wrote before it stopped.
 	h.sink.tables["shop.items__resync"] = map[string]cell{
@@ -370,7 +370,7 @@ func TestADamagedWatermarkGivesTheResyncUp(t *testing.T) {
 		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Rows: 1,
 		Done: true, Final: "not a GTID set",
 	}})
-	h.store.pos, h.store.found = checkpoint.Position{GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
 	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
 	h.sink.tables["shop.items__resync"] = map[string]cell{"1|": {version: 1, values: []any{int64(1), "a"}}}
 	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}

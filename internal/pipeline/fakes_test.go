@@ -269,8 +269,6 @@ type fakeSink struct {
 	// rebuildErr fails the rebuild.
 	rebuildErr error
 	truncs     []chsink.TruncateRequest
-	// tablesOf answers BinwaveTables: the binwave-shaped tables of a ClickHouse database.
-	tablesOf map[string][]string
 	// renameErrs fails the nth RenameTable call (1-based).
 	renameErrs map[int]error
 	// changeErrs fails the nth Change call (1-based).
@@ -398,12 +396,6 @@ func (s *fakeSink) TruncateTable(_ context.Context, req chsink.TruncateRequest) 
 	s.truncs = append(s.truncs, req)
 	s.journal.add("truncate %s.%s", req.Database, req.Table)
 	return nil
-}
-
-func (s *fakeSink) BinwaveTables(_ context.Context, database string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.tablesOf[database], nil
 }
 
 func (s *fakeSink) Insert(ctx context.Context, t *chsink.Table, rows []chsink.Row) error {

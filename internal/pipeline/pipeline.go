@@ -75,9 +75,6 @@ type Sink interface {
 	SwapShadow(ctx context.Context, req chsink.SwapRequest) error
 	// TruncateTable empties a table that the source truncated, if it exists.
 	TruncateTable(ctx context.Context, req chsink.TruncateRequest) error
-	// BinwaveTables lists the tables of a ClickHouse database that have the shape of binwave's.
-	// It fills the list of tables of a position saved before there was one.
-	BinwaveTables(ctx context.Context, database string) ([]string, error)
 	Insert(ctx context.Context, t *chsink.Table, rows []chsink.Row) error
 }
 
@@ -293,7 +290,7 @@ func (p *Pipeline) Run(ctx context.Context, hooks Hooks) error {
 	if err := p.loadQuarantine(pos); err != nil {
 		return err
 	}
-	if err := p.loadManaged(ctx, pos); err != nil {
+	if err := p.loadManaged(pos); err != nil {
 		return err
 	}
 	p.resyncs = make(map[string]*resyncJob)
