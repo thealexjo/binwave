@@ -17,7 +17,7 @@ updates:
       actions:
         update-types: [minor, patch]
 
-  # The base image of the Dockerfile is pinned by digest.
+  # The images of the Dockerfile are pinned by digest.
   - package-ecosystem: docker
     directory: /
     schedule:

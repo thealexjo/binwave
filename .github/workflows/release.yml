@@ -7,8 +7,10 @@ on:
 permissions:
   contents: read
 
+# One release at a time: an older one finishing after a newer one would move latest and 0.1 back.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
+  cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -17,12 +19,30 @@ jobs:
   # The tagged commit has already passed the whole CI on main; this is the last quick check.
   check:
     runs-on: ubuntu-latest
+    outputs:
+      newest: ${{ steps.order.outputs.newest }}
+      newest-in-minor: ${{ steps.order.outputs.newest-in-minor }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - run: make lint test
+      # Whether the tag is the highest stable version of all, and of its major.minor.
+      - id: order
+        run: |
+          stable=$(git ls-remote --tags --refs origin 'v*' | sed 's|.*refs/tags/||' | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V)
+          tag=$GITHUB_REF_NAME
+          minor=${tag%.*}
+          newest=false
+          newest_in_minor=false
+          if [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ $(tail -n 1 <<<"$stable") == "$tag" ]]; then newest=true; fi
+            if [[ $(grep -E "^${minor//./\\.}\.[0-9]+$" <<<"$stable" | tail -n 1) == "$tag" ]]; then newest_in_minor=true; fi
+          fi
+          echo "$tag: latest $newest, its major.minor $newest_in_minor"
+          echo "newest=$newest" >> "$GITHUB_OUTPUT"
+          echo "newest-in-minor=$newest_in_minor" >> "$GITHUB_OUTPUT"
 
   binaries:
     needs: check
@@ -49,6 +69,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }} # a commit may carry a release candidate's tag too
           GORELEASER_PREVIOUS_TAG: ${{ steps.previous.outputs.ref }}
+          BINWAVE_MAKE_LATEST: ${{ needs.check.outputs.newest }}
       # GitHub keeps attestations only for a public repository of a user.
       - if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -75,11 +96,11 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          # A pre-release (v0.1.0-rc.1) gets only its own tag; latest and 0.1 move with releases.
+          # Every version gets its own tag; latest and 0.1 move only to the highest stable version (check).
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-          flavor: latest=auto
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.check.outputs.newest-in-minor }}
+          flavor: latest=${{ needs.check.outputs.newest }}
       - id: commit
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
       - id: push

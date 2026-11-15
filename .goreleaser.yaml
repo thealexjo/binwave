@@ -52,3 +52,4 @@ changelog:
 
 release:
   prerelease: auto
+  make_latest: "{{ .Env.BINWAVE_MAKE_LATEST }}" # only the highest stable version, decided by the release workflow
