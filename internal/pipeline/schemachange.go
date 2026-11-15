@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/thealexjo/binwave/internal/checkpoint"
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/ddl"
 	"github.com/thealexjo/binwave/internal/event"
@@ -268,6 +269,7 @@ func (p *Pipeline) renameTables(ctx context.Context, pairs []ddl.Rename) error {
 		req.FromDatabase, req.From = chsink.TargetName(p.cfg, r.From.Database, r.From.Table)
 		req.ToDatabase, req.To = chsink.TargetName(p.cfg, r.To.Database, r.To.Table)
 		if req.FromDatabase == req.ToDatabase && req.From == req.To {
+			p.follow(from, to, toRepl, req)
 			continue // both names are written to one ClickHouse table
 		}
 		err := p.withRetry(ctx, "rename table "+from, func(actx context.Context) error {
@@ -282,8 +284,21 @@ func (p *Pipeline) renameTables(ctx context.Context, pairs []ddl.Rename) error {
 			}
 			return fmt.Errorf("rename table %s to %s: %w", from, to, err)
 		}
+		p.follow(from, to, toRepl, req)
 	}
 	return nil
+}
+
+// follow moves a renamed table in the list of tables: under its new name if that is replicated, out of
+// the list otherwise, where it keeps its data and is not binwave's any more.
+func (p *Pipeline) follow(from, to string, toRepl bool, req chsink.RenameRequest) {
+	if req.DryRun {
+		return // nothing was renamed
+	}
+	p.unmanage(from)
+	if toRepl {
+		p.manage(to, checkpoint.Target{Database: req.ToDatabase, Table: req.To})
+	}
 }
 
 // forgetChecks makes the guard look again at the replicated tables a statement names: it may have

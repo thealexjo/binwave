@@ -38,11 +38,29 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
+// fakeTablesRow is the row with the list of tables; without one there is none.
+type fakeTablesRow struct {
+	tables string
+	seq    uint64
+}
+
+func (r *fakeTablesRow) Err() error           { return nil }
+func (r *fakeTablesRow) ScanStruct(any) error { return errors.New("not used") }
+func (r *fakeTablesRow) Scan(dest ...any) error {
+	if r == nil {
+		return sql.ErrNoRows
+	}
+	*dest[0].(*string) = r.tables
+	*dest[1].(*uint64) = r.seq
+	return nil
+}
+
 type fakeConn struct {
-	execs   []string
-	args    [][]any
-	row     fakeRow
-	execErr error
+	execs     []string
+	args      [][]any
+	row       fakeRow
+	tablesRow *fakeTablesRow
+	execErr   error
 	// execErrs fails the nth Exec (1-based).
 	execErrs map[int]error
 }
@@ -56,7 +74,12 @@ func (c *fakeConn) Exec(_ context.Context, query string, args ...any) error {
 	return c.execErr
 }
 
-func (c *fakeConn) QueryRow(context.Context, string, ...any) driver.Row { return c.row }
+func (c *fakeConn) QueryRow(_ context.Context, _ string, args ...any) driver.Row {
+	if len(args) > 0 && args[0] == tablesID {
+		return c.tablesRow
+	}
+	return c.row
+}
 
 func TestClickHouseLoadWithoutRows(t *testing.T) {
 	store := NewClickHouse(&fakeConn{row: fakeRow{err: sql.ErrNoRows}}, "db", "state", nil)
@@ -134,8 +157,8 @@ func TestClickHouseInitCreatesOnlyADatabaseThatIsNotThere(t *testing.T) {
 	if err := NewClickHouse(conn, "db", "state", nil).Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(conn.execs) != 6 || !strings.HasPrefix(conn.execs[1], "CREATE DATABASE IF NOT EXISTS `db`") || !strings.HasPrefix(conn.execs[2], "CREATE TABLE IF NOT EXISTS `db`.`state`") {
-		t.Fatalf("statements = %v, want the table, the database, the table again and three ADD COLUMN", conn.execs)
+	if len(conn.execs) != 7 || !strings.HasPrefix(conn.execs[1], "CREATE DATABASE IF NOT EXISTS `db`") || !strings.HasPrefix(conn.execs[2], "CREATE TABLE IF NOT EXISTS `db`.`state`") {
+		t.Fatalf("statements = %v, want the table, the database, the table again and four ADD COLUMN", conn.execs)
 	}
 }
 
@@ -145,8 +168,8 @@ func TestClickHouseInitNeverDropsAnything(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The database exists: CREATE DATABASE, which needs its privilege even then, is not run.
-	if len(conn.execs) != 4 {
-		t.Fatalf("Init ran %d statements, want CREATE TABLE and three ADD COLUMN: %v", len(conn.execs), conn.execs)
+	if len(conn.execs) != 5 {
+		t.Fatalf("Init ran %d statements, want CREATE TABLE and four ADD COLUMN: %v", len(conn.execs), conn.execs)
 	}
 	if !strings.HasPrefix(conn.execs[0], "CREATE TABLE IF NOT EXISTS `we\\`ird`.`state`") {
 		t.Errorf("first statement = %s", conn.execs[0])
@@ -196,5 +219,43 @@ func TestClickHouseStoresAndLoadsTheResyncs(t *testing.T) {
 	}
 	if got := conn.args[0][5]; got != enc {
 		t.Errorf("the resync list saved = %v, want %v", got, enc)
+	}
+}
+
+func TestClickHouseWritesTheListOfTablesOnlyWhenItChanges(t *testing.T) {
+	ctx := context.Background()
+	enc := EncodeTables(map[string]Target{"shop.orders": {Database: "shop", Table: "orders"}})
+	conn := &fakeConn{row: fakeRow{set: "u:1-9", version: 9, seq: 41}, tablesRow: &fakeTablesRow{tables: enc, seq: 50}}
+	store := NewClickHouse(conn, "db", "state", nil)
+
+	pos, _, err := store.Load(ctx)
+	if err != nil || pos.Tables != enc {
+		t.Fatalf("Load() = (%+v, %v), want the list of tables back", pos, err)
+	}
+	if err := store.Save(ctx, Position{GTIDSet: "u:1-10", Tables: enc}); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.execs) != 1 || conn.args[0][0] != positionID || conn.args[0][1] != uint64(51) {
+		t.Fatalf("an unchanged list was written again, or the sequence went back: %v %v", conn.execs, conn.args)
+	}
+
+	changed := EncodeTables(map[string]Target{"shop.orders": {Database: "shop", Table: "orders"}, "shop.items": {Database: "shop", Table: "items"}})
+	if err := store.Save(ctx, Position{GTIDSet: "u:1-11", Tables: changed}); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.execs) != 3 || conn.args[1][0] != tablesID || conn.args[1][4] != changed || conn.args[2][0] != positionID {
+		t.Fatalf("statements %v %v, want the list and then the position", conn.execs, conn.args)
+	}
+	if conn.args[1][1] != uint64(52) || conn.args[2][1] != uint64(53) {
+		t.Errorf("sequences %v and %v, want 52 and 53", conn.args[1][1], conn.args[2][1])
+	}
+}
+
+func TestClickHouseLoadsAPositionWithoutAListOfTables(t *testing.T) {
+	store := NewClickHouse(&fakeConn{row: fakeRow{set: "u:1-9", version: 9, seq: 3}}, "db", "state", nil)
+
+	pos, found, err := store.Load(context.Background())
+	if err != nil || !found || pos.Tables != "" {
+		t.Fatalf("Load() = (%+v, %v, %v), want the position and no list", pos, found, err)
 	}
 }

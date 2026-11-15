@@ -27,6 +27,9 @@ type Position struct {
 	// needs, which is why the total is saved and not counted from the list. Zero once the load is
 	// done, and in a position saved before there was an initial load.
 	LoadTotal int
+	// Tables lists the ClickHouse tables binwave manages, as EncodeTables renders it: what DROP DATABASE
+	// of the source drops. Empty in a position saved before there was a list.
+	Tables string
 }
 
 // fileFormat is the on-disk document. Format lets a future change be detected.
@@ -40,6 +43,8 @@ type fileFormat struct {
 	Resync string `json:"resync,omitempty"`
 	// LoadTotal is absent in files written before the initial load counted its tables.
 	LoadTotal int `json:"load_total,omitempty"`
+	// Tables is absent in files written before binwave kept a list of its tables.
+	Tables string `json:"tables,omitempty"`
 }
 
 const fileFormatVersion = 1
@@ -71,14 +76,14 @@ func (f *File) Load(_ context.Context) (pos Position, found bool, err error) {
 	if doc.Format != fileFormatVersion {
 		return Position{}, false, fmt.Errorf("checkpoint %s has unsupported format %d", f.path, doc.Format)
 	}
-	return Position{GTIDSet: doc.GTIDSet, Version: doc.Version, Quarantine: doc.Quarantine, Resync: doc.Resync, LoadTotal: doc.LoadTotal}, true, nil
+	return Position{GTIDSet: doc.GTIDSet, Version: doc.Version, Quarantine: doc.Quarantine, Resync: doc.Resync, LoadTotal: doc.LoadTotal, Tables: doc.Tables}, true, nil
 }
 
 // Save durably replaces the stored position: the new content is written to a temporary file,
 // flushed to disk, and renamed over the old one, so a crash leaves either the old or the new
 // position and never a partial file.
 func (f *File) Save(_ context.Context, pos Position) error {
-	data, err := json.Marshal(fileFormat{Format: fileFormatVersion, GTIDSet: pos.GTIDSet, Version: pos.Version, Quarantine: pos.Quarantine, Resync: pos.Resync, LoadTotal: pos.LoadTotal})
+	data, err := json.Marshal(fileFormat{Format: fileFormatVersion, GTIDSet: pos.GTIDSet, Version: pos.Version, Quarantine: pos.Quarantine, Resync: pos.Resync, LoadTotal: pos.LoadTotal, Tables: pos.Tables})
 	if err != nil {
 		return fmt.Errorf("encode checkpoint: %w", err)
 	}

@@ -142,23 +142,26 @@ func (c *Client) TruncateTable(ctx context.Context, req TruncateRequest) error {
 	return nil
 }
 
-// BinwaveTables lists the tables of a ClickHouse database that have the shape of the tables
-// binwave creates (the service columns _version and _is_deleted), which is how DROP DATABASE of the
-// source finds what to drop without touching a table that is not binwave's, such as the position
-// store.
+// BinwaveTables lists the tables of a ClickHouse database that have the shape of the tables binwave
+// creates: the engine ReplacingMergeTree(_version, _is_deleted) and the three service columns with
+// their types. It is how the list of tables of a position saved before there was one is filled.
 func (c *Client) BinwaveTables(ctx context.Context, database string) ([]string, error) {
-	rows, err := c.conn.Query(ctx, "SELECT table FROM system.columns WHERE database = ? AND name IN (?, ?) GROUP BY table HAVING count() = 2 ORDER BY table", database, ColVersion, ColIsDeleted)
+	rows, err := c.conn.Query(ctx, "SELECT name, engine_full FROM system.tables WHERE database = ? AND name IN ("+
+		"SELECT table FROM system.columns WHERE database = ? AND (name, type) IN ((?, ?), (?, ?), (?, ?)) GROUP BY table HAVING count() = 3"+
+		") ORDER BY name", database, database, ColVersion, versionType, ColIsDeleted, isDeletedType, ColSyncedAt, syncedAtType)
 	if err != nil {
 		return nil, fmt.Errorf("list the tables of %s: %w", database, err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var name, engine string
+		if err := rows.Scan(&name, &engine); err != nil {
 			return nil, fmt.Errorf("list the tables of %s: %w", database, err)
 		}
-		out = append(out, name)
+		if isBinwaveEngine(engine) {
+			out = append(out, name)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list the tables of %s: %w", database, err)

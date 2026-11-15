@@ -153,6 +153,20 @@ func TestFileKeepsTheQuarantineWithThePosition(t *testing.T) {
 	}
 }
 
+func TestFileKeepsTheListOfTablesWithThePosition(t *testing.T) {
+	ctx := context.Background()
+	f := NewFile(filepath.Join(t.TempDir(), "cp.json"))
+	pos := Position{GTIDSet: "u:1-5", Version: 5, Tables: EncodeTables(map[string]Target{"shop.orders": {Database: "shop", Table: "orders"}})}
+
+	if err := f.Save(ctx, pos); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := f.Load(ctx)
+	if err != nil || !found || got != pos {
+		t.Fatalf("Load() = (%+v, %v, %v), want %+v", got, found, err, pos)
+	}
+}
+
 // A file written before tables could be quarantined has no such field and stays valid.
 func TestFileWrittenByAnEarlierVersionLoads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cp.json")

@@ -144,6 +144,32 @@ func TestEnsureRefusesAReplacingMergeTreeWithOtherArguments(t *testing.T) {
 	}
 }
 
+// TestBinwaveTablesListsOnlyTheShapeBinwaveCreates: the engine with its arguments and the three
+// service columns with their types; a copy of a table of binwave's has the shape too.
+func TestBinwaveTablesListsOnlyTheShapeBinwaveCreates(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	sink := openSink(t, ch)
+	tbl := resolveTable(t, kvTable(), nil)
+	if err := sink.Ensure(context.Background(), tbl, additive); err != nil {
+		t.Fatal(err)
+	}
+	execCH(t, ch,
+		"CREATE TABLE replica.copy AS replica.kv",
+		"CREATE TABLE replica.two (id Int32, _version UInt64, _is_deleted UInt8) ENGINE = ReplacingMergeTree(_version, _is_deleted) ORDER BY id",
+		"CREATE TABLE replica.narrow (id Int32, _version UInt32, _is_deleted UInt8, _synced_at DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(_version, _is_deleted) ORDER BY id",
+		"CREATE TABLE replica.plain (id Int32, _version UInt64, _is_deleted UInt8, _synced_at DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree ORDER BY id",
+	)
+
+	got, err := sink.BinwaveTables(context.Background(), "replica")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"copy", "kv"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("BinwaveTables() = %v, want %v", got, want)
+	}
+}
+
 func TestEnsureDDLModes(t *testing.T) {
 	t.Parallel()
 	ch := testenv.StartClickHouse(t)

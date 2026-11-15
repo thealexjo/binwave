@@ -102,8 +102,10 @@ func TestPositionStaysBehindAnUnfinishedTransaction(t *testing.T) {
 	if pos.GTIDSet != "u:1-0" {
 		t.Errorf("saved position = %q, want the start: the transaction never committed", pos.GTIDSet)
 	}
-	if n := len(h.store.saves); n != 1 {
-		t.Errorf("position saved %d times, want only the initial save", n)
+	for _, saved := range h.store.all() {
+		if saved.GTIDSet != "u:1-0" {
+			t.Errorf("position %q saved, want only the start", saved.GTIDSet)
+		}
 	}
 }
 

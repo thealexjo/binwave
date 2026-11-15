@@ -1267,6 +1267,7 @@ func (p *Pipeline) finishIfReady(ctx context.Context, job *resyncJob, committed 
 	p.resyncSetChanged = true
 	p.untrackResync(name)
 	p.forgetTable(name)
+	p.manage(name, checkpoint.Target{Database: tdb, Table: ttable})
 	p.d.Observer.ResyncFinished(name, true)
 	if job.state.Autoresync {
 		// tables.autoresync fixed this on its own: visible in a metric even though nobody had to look,

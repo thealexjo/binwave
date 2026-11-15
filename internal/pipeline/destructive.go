@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/event"
@@ -82,11 +81,17 @@ func (p *Pipeline) dropTable(ctx context.Context, db, table string) error {
 	}
 	req := chsink.DropRequest{Source: name, DryRun: p.cfg.DDL.DryRun}
 	req.Database, req.Table = chsink.TargetName(p.cfg, db, table)
+	if t, ok := p.managed[name]; ok {
+		req.Database, req.Table = t.Database, t.Table // the table binwave writes the source table into
+	}
 	err := p.withRetry(ctx, "drop table "+name, func(actx context.Context) error {
 		return p.d.Sink.DropTable(actx, req)
 	})
 	if err != nil {
 		return fmt.Errorf("drop table %s: %w", name, err)
+	}
+	if !req.DryRun {
+		p.unmanage(name)
 	}
 	return nil
 }
@@ -109,12 +114,9 @@ func (p *Pipeline) truncateTable(ctx context.Context, db, table string) error {
 	return nil
 }
 
-// dropDatabase drops the tables of the database that binwave replicated, in ClickHouse. The
-// database itself is not dropped: it may hold more than binwave's tables. Which tables came from the
-// dropped database is read from ClickHouse, since the source no longer has them: the tables that
-// have binwave's shape, in the ClickHouse database of that source database. With
-// tables.target_database every database goes to one ClickHouse database, and only the tables this
-// process has written under their source name are known to belong to the dropped database.
+// dropDatabase drops the tables of the database that binwave manages (the list of tables), in
+// ClickHouse. The database itself is not dropped: it may hold more than binwave's tables, and a table
+// there that binwave did not create or write to is not binwave's to drop, whatever its shape.
 func (p *Pipeline) dropDatabase(ctx context.Context, e event.DDL, db string) error {
 	if !p.router.SelectsDatabase(db) {
 		return nil
@@ -125,40 +127,17 @@ func (p *Pipeline) dropDatabase(ctx context.Context, e event.DDL, db string) err
 			"database", db, "statement", e.Query)
 		return nil
 	}
-	chDB, _ := chsink.TargetName(p.cfg, db, "")
-	var names []string
-	err := p.withRetry(ctx, "list the tables of "+chDB, func(actx context.Context) error {
-		var err error
-		names, err = p.d.Sink.BinwaveTables(actx, chDB)
-		return err
-	})
-	if err != nil {
-		return fmt.Errorf("drop database %s: %w", db, err)
+	var tables []string
+	for name := range p.managed {
+		if d, table, _ := cutQualified(name); d == db && p.router.Match(db, table) {
+			tables = append(tables, table)
+		}
 	}
-	sort.Strings(names)
-	for _, n := range names {
-		table := p.sourceTableOf(db, n)
-		if !p.router.Match(db, table) {
-			continue
-		}
-		if p.cfg.Tables.TargetDatabase != "" && p.targets["`"+chDB+"`.`"+n+"`"] != db+"."+table {
-			p.log.Warn("table kept: source database unknown",
-				"database", db, "clickhouse_table", chDB+"."+n)
-			continue
-		}
+	sort.Strings(tables)
+	for _, table := range tables {
 		if err := p.dropTable(ctx, db, table); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// sourceTableOf is the source table that is written to the ClickHouse table n of the database db.
-func (p *Pipeline) sourceTableOf(db, n string) string {
-	for key, ov := range p.cfg.Tables.Overrides {
-		if ov.TargetTable == n && strings.HasPrefix(key, db+".") {
-			return strings.TrimPrefix(key, db+".")
-		}
-	}
-	return n
 }

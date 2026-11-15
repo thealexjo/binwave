@@ -76,6 +76,7 @@ type Sink interface {
 	// TruncateTable empties a table that the source truncated, if it exists.
 	TruncateTable(ctx context.Context, req chsink.TruncateRequest) error
 	// BinwaveTables lists the tables of a ClickHouse database that have the shape of binwave's.
+	// It fills the list of tables of a position saved before there was one.
 	BinwaveTables(ctx context.Context, database string) ([]string, error)
 	Insert(ctx context.Context, t *chsink.Table, rows []chsink.Row) error
 }
@@ -147,6 +148,10 @@ type Pipeline struct {
 	// targets maps each ClickHouse table in use to the source table that feeds it, to refuse two
 	// sources writing into one target.
 	targets map[string]string
+	// managed is the list of ClickHouse tables binwave manages, by source table (see managed.go), and
+	// managedStale says it changed since it was last put into the position.
+	managed      map[string]checkpoint.Target
+	managedStale bool
 
 	buffers  map[*chsink.Table]*tableBuffer
 	order    []*chsink.Table // buffers in the order they were first filled
@@ -247,6 +252,7 @@ func New(cfg *config.Config, d Deps) (*Pipeline, error) {
 		registry: make(map[string]*binding),
 		recheck:  make(map[string]bool),
 		targets:  make(map[string]string),
+		managed:  make(map[string]checkpoint.Target),
 		buffers:  make(map[*chsink.Table]*tableBuffer),
 		resyncs:  make(map[string]*resyncJob),
 		reading:  make(map[string]*resyncJob),
@@ -283,6 +289,9 @@ func (p *Pipeline) Run(ctx context.Context, hooks Hooks) error {
 	p.committed, p.saved = pos, pos
 	p.q.setSince(pos.GTIDSet)
 	if err := p.loadQuarantine(pos); err != nil {
+		return err
+	}
+	if err := p.loadManaged(ctx, pos); err != nil {
 		return err
 	}
 	p.resyncs = make(map[string]*resyncJob)
@@ -369,6 +378,7 @@ func (p *Pipeline) startPosition(ctx context.Context) (checkpoint.Position, erro
 	default:
 		return checkpoint.Position{}, fmt.Errorf("%w: initial position %q", ErrUnsupported, p.cfg.Replication.InitialPosition)
 	}
+	pos.Tables = checkpoint.EncodeTables(nil) // nothing written yet, which is not a list to make
 
 	if err := p.withRetry(ctx, "save initial position", func(actx context.Context) error {
 		return p.d.Store.Save(actx, pos)
@@ -560,7 +570,7 @@ func (p *Pipeline) commit(ctx context.Context, e event.Commit) error {
 	// that hold an entry per table on every single commit is what a commit must not cost.
 	p.committed = checkpoint.Position{
 		GTIDSet: e.GTIDSet, Version: p.tx.version, Quarantine: p.committed.Quarantine,
-		Resync: p.committed.Resync, LoadTotal: p.committed.LoadTotal,
+		Resync: p.committed.Resync, LoadTotal: p.committed.LoadTotal, Tables: p.committed.Tables,
 	}
 	p.q.setSince(e.GTIDSet)
 	p.committedAt = p.tx.commit
@@ -637,7 +647,8 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 	if err != nil {
 		return nil, err
 	}
-	if job, resyncing := p.resyncs[name]; resyncing {
+	job, resyncing := p.resyncs[name]
+	if resyncing {
 		// The table is being resynchronized: its changes go to the shadow table, which replaces it.
 		t.Name, t.Comment = job.state.Shadow, chsink.ResyncMarker
 	}
@@ -667,6 +678,9 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 	p.registry[name] = b
 	p.d.Observer.TablesBound(len(p.registry))
 	p.targets[t.FullName()] = name
+	if !resyncing {
+		p.manage(name, checkpoint.Target{Database: t.Database, Table: t.Name})
+	}
 	p.log.Info("replicating table", "source", name, "target", t.FullName(), "order_by", t.OrderBy)
 	return b, nil
 }
@@ -889,6 +903,7 @@ func (p *Pipeline) flushThen(ctx context.Context, savePosition bool) error {
 		return nil
 	}
 	p.materializeResyncs()
+	p.materializeManaged()
 	if p.committed != p.saved {
 		if err := p.withRetry(ctx, "save position", func(actx context.Context) error {
 			return p.d.Store.Save(actx, p.committed)

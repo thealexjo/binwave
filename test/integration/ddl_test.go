@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -127,29 +129,113 @@ func TestPartitionStatementsOfARealServerAreSkippedWithAWarning(t *testing.T) {
 }
 
 // TestDropDatabaseOfARealServerDropsTheReplicatedTables: the tables of the dropped database that
-// binwave wrote are dropped in ClickHouse, the others stay.
+// binwave wrote are dropped in ClickHouse, the others stay, a table of binwave's shape there included.
 func TestDropDatabaseOfARealServerDropsTheReplicatedTables(t *testing.T) {
 	t.Parallel()
 	my := testenv.StartMySQL(t)
 	ch := testenv.StartClickHouse(t)
-	for _, q := range []string{"CREATE DATABASE other", "GRANT ALL ON other.* TO 'binwave'@'%'"} {
-		if _, err := rootDB(t, my).Exec(q); err != nil {
-			t.Fatal(q, err)
-		}
-	}
+	createSourceDatabase(t, my, "other")
 	mustExec(t, my, "CREATE TABLE other.t (id INT PRIMARY KEY)", "CREATE TABLE binwave.keep (id INT PRIMARY KEY)")
 	cfg := engineConfigWith(t, my, ch, "file", `tables: {include: ["binwave.*", "other.*"]}`)
+	cfg.Tables.TargetDatabase = "" // other.t is other.t in ClickHouse, where a table of someone else can be
 	cfg.DDL.Mode = config.DDLFull
 	e := startHubEngine(t, cfg)
 	mustExec(t, my, "INSERT INTO other.t VALUES (1)", "INSERT INTO binwave.keep VALUES (1)")
-	waitUntil(t, "the rows", 60*time.Second, func() bool { return chRowCount(t, ch, "t") == 1 && chRowCount(t, ch, "keep") == 1 })
+	waitUntil(t, "the rows", 60*time.Second, func() bool { return chCount(t, ch, "other.t") == 1 && chCount(t, ch, "binwave.keep") == 1 })
+	execCH(t, ch, "CREATE TABLE other.stray AS other.t")
 
 	mustExec(t, my, "DROP DATABASE other", "INSERT INTO binwave.keep VALUES (2)")
 
 	waitUntil(t, "the tables of the dropped database to go", 60*time.Second, func() bool {
-		return chRowCount(t, ch, "t") == -1 && chRowCount(t, ch, "keep") == 2
+		return chCount(t, ch, "other.t") == -1 && chCount(t, ch, "binwave.keep") == 2
 	})
+	if !chExists(t, ch, "other", "stray") {
+		t.Error("DROP DATABASE dropped a table binwave never wrote to")
+	}
 	e.stillRunning(t)
+}
+
+// TestAnUpgradeAdoptsTheTablesBinwaveWrote: a position saved by a version that kept no list of tables
+// gets one at the first start, of the tables binwave wrote: DROP DATABASE drops them, and leaves a
+// table of binwave's shape without a source table and a target that is not of binwave's shape.
+func TestAnUpgradeAdoptsTheTablesBinwaveWrote(t *testing.T) {
+	t.Parallel()
+	my := testenv.StartMySQL(t)
+	ch := testenv.StartClickHouse(t)
+	createSourceDatabase(t, my, "other")
+	mustExec(t, my, "CREATE TABLE other.t (id INT PRIMARY KEY)", "CREATE TABLE other.u (id INT PRIMARY KEY)", "CREATE TABLE other.v (id INT PRIMARY KEY)")
+	cfg := engineConfigWith(t, my, ch, "file", `tables: {include: ["other.t", "other.u", "other.v"]}`)
+	cfg.Tables.TargetDatabase = ""
+	cfg.DDL.Mode = config.DDLFull
+	e := startEngine(t, cfg)
+	mustExec(t, my, "INSERT INTO other.t VALUES (1)", "INSERT INTO other.u VALUES (1)")
+	waitUntil(t, "the rows", 60*time.Second, func() bool { return chCount(t, ch, "other.t") == 1 && chCount(t, ch, "other.u") == 1 })
+	if err := e.stop(t); err != nil {
+		t.Fatal(err)
+	}
+
+	// The state an earlier version saved: the position, no list of tables.
+	data, err := os.ReadFile(cfg.Checkpoint.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc["tables"]; !ok {
+		t.Fatalf("the saved state %s has no list of tables to remove", data)
+	}
+	delete(doc, "tables")
+	if data, err = json.Marshal(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Checkpoint.FilePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	execCH(t, ch, "CREATE TABLE other.stray AS other.t", "CREATE TABLE other.v (id Int32, _version UInt64, _is_deleted UInt8) ENGINE = MergeTree ORDER BY id")
+
+	e = startEngine(t, cfg)
+	mustExec(t, my, "DROP DATABASE other")
+	waitUntil(t, "the tables binwave wrote to go", 60*time.Second, func() bool {
+		return chCount(t, ch, "other.t") == -1 && chCount(t, ch, "other.u") == -1
+	})
+	if !chExists(t, ch, "other", "stray") || !chExists(t, ch, "other", "v") {
+		t.Error("DROP DATABASE dropped a table binwave never wrote to")
+	}
+	if err := e.stop(t); err != nil {
+		t.Errorf("graceful stop returned %v", err)
+	}
+}
+
+// createSourceDatabase creates a database in MySQL that the binwave user may read and write.
+func createSourceDatabase(t *testing.T, my *testenv.MySQL, name string) {
+	t.Helper()
+	for _, q := range []string{"CREATE DATABASE " + name, "GRANT ALL ON " + name + ".* TO 'binwave'@'%'"} {
+		if _, err := rootDB(t, my).Exec(q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+}
+
+// chExists reports whether ClickHouse has the table.
+func chExists(t *testing.T, ch *testenv.ClickHouse, database, table string) bool {
+	t.Helper()
+	var n uint64
+	if err := ch.DB.QueryRow("SELECT count() FROM system.tables WHERE database = ? AND name = ?", database, table).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n == 1
+}
+
+// chCount counts the live rows of a ClickHouse table, database.table; -1 when it does not exist.
+func chCount(t *testing.T, ch *testenv.ClickHouse, table string) int {
+	t.Helper()
+	var n uint64
+	if err := ch.DB.QueryRow("SELECT count() FROM (SELECT * FROM " + table + " FINAL WHERE _is_deleted = 0)").Scan(&n); err != nil {
+		return -1
+	}
+	return int(n)
 }
 
 // TestCreateTableSelectReplicatesItsRows: with row-based logging the server writes CREATE TABLE ...

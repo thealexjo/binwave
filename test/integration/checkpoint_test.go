@@ -31,8 +31,11 @@ func checkStoreContract(t *testing.T, reopen func() positionStore) {
 
 	const uuid = "6d4d8f60-1111-2222-3333-444455556666"
 	first := checkpoint.Position{GTIDSet: uuid + ":1-10", Version: 100}
-	second := checkpoint.Position{GTIDSet: uuid + ":1-25", Version: 1<<63 + 250, // beyond float64 precision
-		Quarantine: checkpoint.EncodeQuarantine([]checkpoint.Quarantined{{Table: "shop.orders", Since: uuid + ":1-20", Reason: "no key"}})}
+	second := checkpoint.Position{
+		GTIDSet: uuid + ":1-25", Version: 1<<63 + 250, // beyond float64 precision
+		Quarantine: checkpoint.EncodeQuarantine([]checkpoint.Quarantined{{Table: "shop.orders", Since: uuid + ":1-20", Reason: "no key"}}),
+		Tables:     checkpoint.EncodeTables(map[string]checkpoint.Target{"shop.items": {Database: "shop", Table: "items"}}),
+	}
 	if err := store.Save(ctx, first); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +51,7 @@ func checkStoreContract(t *testing.T, reopen func() positionStore) {
 	}
 
 	// It can keep saving, and the next restart sees that.
-	third := checkpoint.Position{GTIDSet: uuid + ":1-40", Version: 1<<63 + 400}
+	third := checkpoint.Position{GTIDSet: uuid + ":1-40", Version: 1<<63 + 400, Tables: checkpoint.EncodeTables(nil)}
 	if err := restarted.Save(ctx, third); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +156,7 @@ func TestClickHouseStoreUpgradesAStateTableOfAnEarlierVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	pos, found, err := store.Load(ctx)
-	if err != nil || !found || pos.GTIDSet != "u:1-9" || pos.Version != 900 || pos.Quarantine != "" {
+	if err != nil || !found || pos.GTIDSet != "u:1-9" || pos.Version != 900 || pos.Quarantine != "" || pos.Tables != "" {
 		t.Fatalf("Load() after the upgrade = (%+v, %v, %v), want the old position without quarantine", pos, found, err)
 	}
 

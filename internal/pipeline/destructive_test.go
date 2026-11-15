@@ -171,39 +171,67 @@ func TestDropDatabaseDropsTheTablesThatWereReplicated(t *testing.T) {
 		h := newHarness(t)
 		h.cfg.Tables.Include = []string{"shop.items", "shop.renamed"}
 		h.cfg.Tables.Overrides = map[string]config.TableOverride{"shop.renamed": {TargetTable: "goods"}}
-		// The position store and the tables of someone else are not in the list: they lack the shape.
+		renamed := itemsTable()
+		renamed.Name = "renamed"
+		// A table of binwave's shape that binwave never wrote to is not in the list.
 		h.sink.tablesOf = map[string][]string{"shop": {"items", "goods", "unselected"}}
-		h.source.script = []scriptedTx{tx(1, ddlEvent("DROP DATABASE shop"))}
-
-		if err := h.run(t); err != nil {
-			t.Fatal(err)
-		}
-		var dropped []string
-		for _, d := range h.sink.drops {
-			dropped = append(dropped, d.Database+"."+d.Table)
-		}
-		if want := []string{"shop.goods", "shop.items"}; !reflect.DeepEqual(dropped, want) {
-			t.Errorf("dropped %v, want %v: unselected tables stay, target_table is followed", dropped, want)
-		}
-	})
-
-	t.Run("one ClickHouse database for all: only the tables known to come from the dropped one", func(t *testing.T) {
-		h := newHarness(t)
-		h.cfg.Tables.TargetDatabase = "replica"
-		h.cfg.Tables.Include = []string{"shop.*", "blog.*"}
-		h.sink.tablesOf = map[string][]string{"replica": {"items", "posts"}}
 		h.source.script = []scriptedTx{
-			tx(1, insertRows(itemsTable(), 1, "a")), // binds shop.items
+			tx(1, insertRows(itemsTable(), 1, "a"), insertRows(renamed, 1, "a")),
 			tx(2, ddlEvent("DROP DATABASE shop")),
 		}
 
 		if err := h.run(t); err != nil {
 			t.Fatal(err)
 		}
-		if len(h.sink.drops) != 1 || h.sink.drops[0].Table != "items" {
-			t.Errorf("dropped %+v, want only items: posts may belong to blog", h.sink.drops)
+		if got, want := droppedTables(h), []string{"shop.items", "shop.goods"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("dropped %v, want %v: the tables written to, target_table followed", got, want)
+		}
+		if pos := h.store.current(); pos.Tables != "{}" {
+			t.Errorf("saved list of tables = %s, want none left", pos.Tables)
 		}
 	})
+
+	t.Run("one ClickHouse database for all: only the tables of the dropped one", func(t *testing.T) {
+		h := newHarness(t)
+		h.cfg.Tables.TargetDatabase = "replica"
+		h.cfg.Tables.Include = []string{"shop.*", "blog.*"}
+		posts := itemsTable()
+		posts.Database, posts.Name = "blog", "posts"
+		h.source.script = []scriptedTx{
+			tx(1, insertRows(itemsTable(), 1, "a"), insertRows(posts, 1, "a")),
+			tx(2, ddlEvent("DROP DATABASE shop")),
+		}
+
+		if err := h.run(t); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := droppedTables(h), []string{"replica.items"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("dropped %v, want %v: posts comes from blog", got, want)
+		}
+	})
+}
+
+// TestDropDatabaseLeavesATableBinwaveNeverWroteTo: a table of binwave's shape, under the name a
+// replicated table of the dropped database would have, is still not binwave's.
+func TestDropDatabaseLeavesATableBinwaveNeverWroteTo(t *testing.T) {
+	h := newHarness(t)
+	h.sink.tablesOf = map[string][]string{"shop": {"items"}}
+	h.source.script = []scriptedTx{tx(1, ddlEvent("DROP DATABASE shop"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.sink.drops) != 0 {
+		t.Errorf("dropped %+v", h.sink.drops)
+	}
+}
+
+func droppedTables(h *harness) []string {
+	var out []string
+	for _, d := range h.sink.drops {
+		out = append(out, d.Database+"."+d.Table)
+	}
+	return out
 }
 
 func TestDropDatabaseThatIsNotReplicatedIsIgnored(t *testing.T) {
