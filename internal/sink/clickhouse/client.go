@@ -341,6 +341,7 @@ var transientCodes = map[int32]bool{
 	202: true, // TOO_MANY_SIMULTANEOUS_QUERIES
 	209: true, // SOCKET_TIMEOUT
 	210: true, // NETWORK_ERROR
+	236: true, // ABORTED: a server shutting down aborts the inserts in flight
 	241: true, // MEMORY_LIMIT_EXCEEDED
 	252: true, // TOO_MANY_PARTS: the server asks inserts to slow down
 	319: true, // UNKNOWN_STATUS_OF_INSERT: the insert may have happened; repeating is safe
