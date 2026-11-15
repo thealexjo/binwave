@@ -321,3 +321,86 @@ func TestServeLeavesASocketItCannotDialAlone(t *testing.T) {
 		t.Errorf("the socket is gone: %v", err)
 	}
 }
+
+// TestOnlyOneOfServicesStartingAtOnceTakesTheSocket: two instances with the same control.socket, or a
+// binwave run beside the service, start over the socket of one that died; one of them must lose.
+func TestOnlyOneOfServicesStartingAtOnceTakesTheSocket(t *testing.T) {
+	path := filepath.Join(shortDir(t), "c.sock")
+	log := slog.New(slog.DiscardHandler)
+	for range 200 {
+		leftoverSocket(t, path)
+		var (
+			wg    sync.WaitGroup
+			mu    sync.Mutex
+			stops []func()
+		)
+		begin := make(chan struct{})
+		for range 8 {
+			wg.Go(func() {
+				<-begin
+				if stop, err := Serve(path, &fakeBackend{}, log); err == nil {
+					mu.Lock()
+					stops = append(stops, stop)
+					mu.Unlock()
+				}
+			})
+		}
+		close(begin)
+		wg.Wait()
+		for _, stop := range stops {
+			stop()
+		}
+		if len(stops) != 1 {
+			t.Fatalf("%d services took the socket, want exactly one", len(stops))
+		}
+	}
+}
+
+// blockingBackend holds a pause until it is let go.
+type blockingBackend struct {
+	fakeBackend
+	entered, release chan struct{}
+}
+
+func (b *blockingBackend) Pause(context.Context) error {
+	close(b.entered)
+	<-b.release
+	return nil
+}
+
+// TestStoppingLeavesTheSocketOfTheNextServiceAlone: a stop that waits for a slow request must not remove
+// the socket that someone else has created at the path meanwhile.
+func TestStoppingLeavesTheSocketOfTheNextServiceAlone(t *testing.T) {
+	b := &blockingBackend{entered: make(chan struct{}), release: make(chan struct{})}
+	path := filepath.Join(shortDir(t), "c.sock")
+	stop, err := Serve(path, b, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = Client{Socket: path}.Pause(context.Background()) }()
+	<-b.entered
+
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stop did not close the socket")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	next, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	close(b.release)
+	<-stopped
+
+	if info, err := os.Lstat(path); err != nil || info.Mode().Type() != os.ModeSocket {
+		t.Errorf("the socket of the next service is gone: %v", err)
+	}
+}

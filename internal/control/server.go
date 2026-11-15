@@ -23,7 +23,19 @@ var umaskMu sync.Mutex
 // Serve listens on the Unix socket at path and serves the control API until the returned stop
 // function is called. A socket left by a process that died is replaced; a socket that another
 // live service answers on is an error. The socket is private to the user of the process.
+//
+// The server holds an exclusive lock on path + ".lock" for its whole life, so of the processes
+// that start at once on the same path only one replaces, creates and later removes the socket.
 func Serve(path string, b Backend, log *slog.Logger) (stop func(), err error) {
+	lock, err := lockSocket(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = lock.Close()
+		}
+	}()
 	if err := removeStale(path); err != nil {
 		return nil, err
 	}
@@ -51,10 +63,27 @@ func Serve(path string, b Backend, log *slog.Logger) (stop func(), err error) {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(ctx)
+		_ = srv.Shutdown(ctx) // closing the listener removes the socket
 		<-done
-		_ = os.Remove(path)
+		_ = lock.Close()
 	}, nil
+}
+
+// lockSocket takes the lock that makes a process the owner of the socket at path. The lock file is
+// left in place: removing it would let two processes hold locks on two different files.
+func lockSocket(path string) (*os.File, error) {
+	f, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("control.socket %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("control.socket %s is served by another process", path)
+		}
+		return nil, fmt.Errorf("lock control.socket %s: %w", path, err)
+	}
+	return f, nil
 }
 
 // removeStale removes the socket that a process which died left at path, and nothing else: not a
