@@ -203,12 +203,16 @@ func TestTablesCommandsWorkOnARunningServiceThroughTheControlChannel(t *testing.
 }
 
 // TestARestartShowsTheSavedPositionOnAQuietSource: after a restart the status says where replication
-// stands, whether it runs or starts paused, without waiting for a change of the source to be saved.
+// stands and how many tables it replicates, whether it runs or starts paused, without waiting for a
+// change of the source.
 func TestARestartShowsTheSavedPositionOnAQuietSource(t *testing.T) {
 	t.Parallel()
 	my := testenv.StartMySQL(t)
 	ch := testenv.StartClickHouse(t)
-	mustExec(t, my, "CREATE TABLE binwave.acct (id INT PRIMARY KEY, owner VARCHAR(20) NOT NULL, qty INT NOT NULL)")
+	mustExec(t, my,
+		"CREATE TABLE binwave.acct (id INT PRIMARY KEY, owner VARCHAR(20) NOT NULL, qty INT NOT NULL)",
+		"CREATE TABLE binwave.quiet (id INT PRIMARY KEY)",
+	)
 	cfg := engineConfig(t, my, ch, "file")
 	cfg.Control.Socket = shortSocket(t)
 
@@ -229,6 +233,8 @@ func TestARestartShowsTheSavedPositionOnAQuietSource(t *testing.T) {
 		if got := metricValue(t, e.hub, "binwave_position_version"); got != float64(saved.Version) {
 			t.Errorf("autostart %v: binwave_position_version = %v, want %d", autostart, got, saved.Version)
 		}
+		// Both tables count, though no row of either has come since the restart.
+		waitUntil(t, "both tables to be counted", 30*time.Second, func() bool { return e.hub.Status().Tables == 2 })
 		if err := e.stop(); err != nil {
 			t.Fatalf("autostart %v: graceful stop returned %v", autostart, err)
 		}

@@ -481,7 +481,7 @@ func TestReplicationStatusPrintsWhatMattersToTheOperator(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit code = %d\n%s", code, stderr.String())
 	}
-	for _, want := range []string{"state:        paused", "paused since:", "u:1-5", "lag:          90s", "4 changed since start, 1 quarantined", "too many parts"} {
+	for _, want := range []string{"state:        paused", "paused since:", "u:1-5", "lag:          90s", "4 replicated, 1 of them quarantined", "too many parts"} {
 		assertContains(t, "stdout", stdout.String(), want)
 	}
 }

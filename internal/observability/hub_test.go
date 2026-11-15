@@ -67,7 +67,7 @@ func TestCountersFollowWhatThePipelineReports(t *testing.T) {
 	h.Retry("insert", "overload", errors.New("too many parts"))
 	h.Retry("insert", "transient", errors.New("reset"))
 	h.Retry("insert", "transient", errors.New("reset"))
-	h.TablesBound(4)
+	h.TablesSelected(4)
 	h.DestructiveDDLSkipped()
 	h.SourceReconnected()
 	h.StartupFailed(errors.New("refused"))
@@ -212,7 +212,7 @@ func TestHealthAndReadinessEndpoints(t *testing.T) {
 func TestStatusReportsPositionLagAndLastError(t *testing.T) {
 	h, c := newTestHub()
 	h.Ready()
-	h.TablesBound(2)
+	h.TablesSelected(2)
 	h.PositionSaved(checkpoint.Position{GTIDSet: "u:1-9", Version: 3}, c.Now(), time.Time{})
 	h.Idle()
 	h.Retry("insert", "transient", errors.New("connection reset"))

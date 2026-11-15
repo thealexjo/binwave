@@ -25,15 +25,16 @@ const healthStaleAfter = 30 * time.Second
 
 // Status is the body of /status.
 type Status struct {
-	State         State      `json:"state"`
-	Version       string     `json:"version"`
-	Commit        string     `json:"commit"`
-	UptimeSeconds float64    `json:"uptime_seconds"`
-	LagSeconds    float64    `json:"lag_seconds"`
-	CaughtUp      bool       `json:"caught_up"`
-	Position      string     `json:"position"`
-	Tables        int        `json:"tables"`
-	LastError     *LastError `json:"last_error"`
+	State         State   `json:"state"`
+	Version       string  `json:"version"`
+	Commit        string  `json:"commit"`
+	UptimeSeconds float64 `json:"uptime_seconds"`
+	LagSeconds    float64 `json:"lag_seconds"`
+	CaughtUp      bool    `json:"caught_up"`
+	Position      string  `json:"position"`
+	Tables        int     `json:"tables"` // source tables the configuration selects; see binwave_tables
+
+	LastError *LastError `json:"last_error"`
 	// PausedSince is when replication was paused; null while it runs.
 	PausedSince *time.Time `json:"paused_since"`
 	// Quarantined lists the tables that are not being replicated, with the reason.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -154,7 +155,10 @@ func TestGuardReportsAReadFailure(t *testing.T) {
 type fakeQuarantiner struct {
 	tables map[string]string
 	codes  map[string]errcode.Code
+	found  []string
 }
+
+func (f *fakeQuarantiner) TablesFound(names []string) { f.found = append(f.found, names...) }
 
 func (f *fakeQuarantiner) Quarantine(table string, code errcode.Code, reason string) bool {
 	if f.tables == nil {
@@ -192,6 +196,15 @@ func TestPreflightSetsTheTablesAsideAndTheServiceGoesOn(t *testing.T) {
 	}
 	if q.codes["shop.orders"] != errcode.TBL301 || q.codes["shop.keyless"] != errcode.TBL101 {
 		t.Errorf("codes = %v, want shop.orders TBL301 (cascade) and shop.keyless TBL101 (no key)", q.codes)
+	}
+}
+
+// TestPreflightTellsThePipelineEveryTableItFound: the count of tables includes those with a problem
+// and those whose rows have not come yet.
+func TestPreflightTellsThePipelineEveryTableItFound(t *testing.T) {
+	q, _ := runPreflight(t, guardConfig(config.CascadesError), cascadingCatalog())
+	if want := []string{"shop.orders", "shop.keyless"}; !slices.Equal(q.found, want) {
+		t.Errorf("found %v, want %v", q.found, want)
 	}
 }
 

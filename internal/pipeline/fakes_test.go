@@ -736,10 +736,11 @@ func (o *fakeObserver) Recovered() {
 	o.mu.Unlock()
 }
 
-func (o *fakeObserver) TablesBound(n int) {
+func (o *fakeObserver) TablesSelected(n int) {
 	o.mu.Lock()
 	o.tables = n
 	o.mu.Unlock()
+	o.note("tables %d", n)
 }
 
 func (o *fakeObserver) RowsSkipped(table string, n int) { o.note("skipped %s %d", table, n) }

@@ -338,7 +338,7 @@ func printStatus(w io.Writer, st observability.Status, again string) {
 		fmt.Fprintf(w, "position:     %s\n", st.Position)
 	}
 	fmt.Fprintf(w, "lag:          %.0fs\n", st.LagSeconds)
-	fmt.Fprintf(w, "tables:       %d changed since start, %d quarantined\n", st.Tables, len(st.Quarantined))
+	fmt.Fprintf(w, "tables:       %d replicated, %d of them quarantined\n", st.Tables, len(st.Quarantined))
 	if e := st.LastError; e != nil {
 		// A failure that is still happening and one that passed read completely differently, and the
 		// record alone does not say which it is: it is written on every retry and kept afterwards.

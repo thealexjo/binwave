@@ -261,15 +261,16 @@ func (e *Engine) run(ctx context.Context, hooks app.Hooks) error {
 	return classify(err)
 }
 
-// quarantiner sets a table aside; the pipeline does it.
-type quarantiner interface {
+// preflightTarget is what the preflight tells the pipeline: the tables it found, and the ones to set aside.
+type preflightTarget interface {
+	TablesFound(names []string)
 	Quarantine(table string, code errcode.Code, reason string) bool
 }
 
 // preflight checks the source tables against the configuration. A mistake of the configuration
 // ends the run with a *app.ConfigError as the cause. A problem of a table sets that table aside
 // and the rest goes on; with tables.on_replication_error: stop it ends the run like the mistake.
-func (e *Engine) preflight(ctx context.Context, src catalogReader, guard *tableGuard, q quarantiner, stop context.CancelCauseFunc) {
+func (e *Engine) preflight(ctx context.Context, src catalogReader, guard *tableGuard, q preflightTarget, stop context.CancelCauseFunc) {
 	cat, err := src.Catalog(ctx, "", "")
 	if err != nil {
 		if ctx.Err() == nil {
@@ -277,6 +278,11 @@ func (e *Engine) preflight(ctx context.Context, src catalogReader, guard *tableG
 		}
 		return
 	}
+	names := make([]string, 0, len(cat.Tables))
+	for _, t := range cat.Tables {
+		names = append(names, t.FullName())
+	}
+	q.TablesFound(names)
 	report := preflight.Check(cat, e.cfg)
 	guard.markChecked(cat, report)
 	if err := guard.confirm(ctx, report); err != nil {

@@ -45,8 +45,9 @@ type Observer interface {
 	// Recovered is called when a request that had been retried finally succeeded. Without it a run of
 	// failures has no end: the status would keep showing the last one as if it were still happening.
 	Recovered()
-	// TablesBound reports how many source tables are replicated.
-	TablesBound(n int)
+	// TablesSelected reports how many source tables the configuration selects (see sourceTables).
+	// Unlike the other methods it may be called from the goroutine of the check after the start.
+	TablesSelected(n int)
 	// RowsSkipped is called with the rows of a change that was dropped because its table is
 	// quarantined.
 	RowsSkipped(table string, rows int)
@@ -93,7 +94,7 @@ func (nopObserver) Idle()                                                   {}
 func (nopObserver) Retry(string, string, error)                             {}
 func (nopObserver) SourceRetry(string, error)                               {}
 func (nopObserver) Recovered()                                              {}
-func (nopObserver) TablesBound(int)                                         {}
+func (nopObserver) TablesSelected(int)                                      {}
 func (nopObserver) ResyncChanged([]snapshot.Status)                         {}
 func (nopObserver) ResyncRowsRead(string, int)                              {}
 func (nopObserver) ResyncFinished(string, bool)                             {}

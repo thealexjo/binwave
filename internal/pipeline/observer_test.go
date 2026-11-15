@@ -279,3 +279,32 @@ func TestEveryRowAResyncReadsIsCounted(t *testing.T) {
 		t.Errorf("rows reported = %v, want %v", got, want)
 	}
 }
+
+// TestTheTablesAreCountedFromTheCatalogAndTheStream: a table counts from the check after the start,
+// whether its rows come or not, and the statements of the stream that create, rename and drop tables
+// change the count; a table the configuration does not select never counts.
+func TestTheTablesAreCountedFromTheCatalogAndTheStream(t *testing.T) {
+	h := newHarness(t)
+	obs := &fakeObserver{}
+	h.obs = obs
+	p := h.pipeline(t)
+	p.TablesFound([]string{"shop.items", "shop.quiet", "warehouse.stock"})
+	h.source.script = []scriptedTx{
+		tx(1, insertRows(itemsTable(), 1, "a")),
+		tx(2, event.DDL{Database: "shop", Query: "CREATE TABLE fresh (id INT PRIMARY KEY)"}),
+		tx(3, event.DDL{Database: "shop", Query: "RENAME TABLE quiet TO warehouse.quiet"}),
+		tx(4, event.DDL{Database: "shop", Query: "CREATE TABLE shop.stock LIKE warehouse.stock"}),
+		tx(5, event.DDL{Database: "shop", Query: "DROP TABLE fresh"}),
+		tx(6, event.DDL{Database: "shop", Query: "DROP DATABASE shop"}),
+	}
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatal(err)
+	}
+
+	got := obs.sequence("tables")
+	want := []string{"tables 2", "tables 3", "tables 2", "tables 3", "tables 2", "tables 0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("observed %v, want %v", got, want)
+	}
+}

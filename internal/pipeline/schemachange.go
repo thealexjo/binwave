@@ -355,7 +355,6 @@ func (p *Pipeline) forgetTable(names ...string) {
 			}
 		}
 	}
-	p.d.Observer.TablesBound(len(p.registry))
 }
 
 // planModify plans a column whose type is redefined. Its default is not part of the change: a

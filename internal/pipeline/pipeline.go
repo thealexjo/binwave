@@ -145,6 +145,8 @@ type Pipeline struct {
 
 	registry map[string]*binding
 	recheck  map[string]bool // tables a statement named since they were vetted: vetted again before their next row
+	tablesMu sync.Mutex
+	tables   sourceTables // guarded by tablesMu
 	// targets maps each ClickHouse table in use to the source table that feeds it, to refuse two
 	// sources writing into one target.
 	targets map[string]string
@@ -609,6 +611,7 @@ func (p *Pipeline) ddl(ctx context.Context, e event.DDL) error {
 		p.interruptResyncs(ctx, e, impacts)
 	}
 	p.forgetChecks(e)
+	p.countTables(e)
 
 	d, ok := classify(e.Query, e.Database)
 	if !ok {
@@ -685,7 +688,7 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 
 	b := &binding{src: src, sig: src.Signature(), table: t}
 	p.registry[name] = b
-	p.d.Observer.TablesBound(len(p.registry))
+	p.tableBound(name)
 	p.targets[t.FullName()] = name
 	if !resyncing {
 		p.manage(name, checkpoint.Target{Database: t.Database, Table: t.Name})

@@ -158,7 +158,8 @@ func NewHub(opts Options) *Hub {
 	}
 	h.bufferRows = gauge("buffer_rows", "Rows waiting in memory to be written to ClickHouse.")
 	h.bufferBytes = gauge("buffer_bytes", "Estimated size of the rows waiting in memory.")
-	h.tables = gauge("tables", "Source tables being replicated.")
+	h.tables = gauge("tables", "Source tables the configuration selects: those the check after the start found, followed by the creations, renames and drops "+
+		"the stream has replicated since. The quarantined ones are among them.")
 
 	fn := func(name, help string, f func() float64) prometheus.GaugeFunc {
 		return prometheus.NewGaugeFunc(prometheus.GaugeOpts{Namespace: "binwave", Name: name, Help: help}, f)
@@ -561,8 +562,8 @@ func (h *Hub) Retry(_, reason string, err error) {
 // data path, which a success of ClickHouse resolves, and a read of the source is not part of it.
 func (h *Hub) SourceRetry(string, error) { h.sourceReadRetries.Inc() }
 
-// TablesBound implements pipeline.Observer.
-func (h *Hub) TablesBound(n int) {
+// TablesSelected implements pipeline.Observer.
+func (h *Hub) TablesSelected(n int) {
 	h.tables.Set(float64(n))
 	h.mu.Lock()
 	h.tableCount = n
