@@ -3,11 +3,14 @@ package migrationsim
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // Statement is one statement the simulation ran. DDL says that it reaches the binlog as a
@@ -150,14 +153,43 @@ func (m *run) q(name string) string { return "`" + m.schema + "`.`" + name + "`"
 
 func ident(name string) string { return "`" + strings.ReplaceAll(name, "`", "``") + "`" }
 
-func (m *run) exec(ddl bool, query string, args ...any) error {
+func (m *run) exec(ddl bool, query string) error {
 	m.mu.Lock()
 	m.log = append(m.log, Statement{SQL: query, DDL: ddl})
 	m.mu.Unlock()
-	if _, err := m.conn.ExecContext(m.ctx, query, args...); err != nil {
+	if _, err := m.conn.ExecContext(m.ctx, query); err != nil {
 		return fmt.Errorf("%s: %w", firstLine(query), err)
 	}
 	return nil
+}
+
+// copyTries and copyRetryWait repeat a chunk the server rolled back for a deadlock or a lock wait
+// timeout, as the tools do (pt-online-schema-change --tries copy_rows:10:0.25).
+const (
+	copyTries     = 10
+	copyRetryWait = 250 * time.Millisecond
+)
+
+// execChunk runs a chunk of the copy, repeated when the server rolled it back for a lock conflict.
+func (m *run) execChunk(query string, args ...any) error {
+	m.mu.Lock()
+	m.log = append(m.log, Statement{SQL: query})
+	m.mu.Unlock()
+	for try := 1; ; try++ {
+		_, err := m.conn.ExecContext(m.ctx, query, args...)
+		if err == nil {
+			return nil
+		}
+		var myErr *mysql.MySQLError
+		if try == copyTries || !errors.As(err, &myErr) || (myErr.Number != 1213 && myErr.Number != 1205) {
+			return fmt.Errorf("%s: %w", firstLine(query), err)
+		}
+		select {
+		case <-time.After(copyRetryWait):
+		case <-m.ctx.Done():
+			return m.ctx.Err()
+		}
+	}
 }
 
 func firstLine(s string) string {
@@ -294,7 +326,7 @@ func (m *run) copyChunks(insertSQL func() string, afterChunk func(chunk int) err
 	}
 	chunk := 0
 	for from := lo.Int64; from <= hi.Int64; from += int64(m.opts.ChunkSize) {
-		if err := m.exec(false, insertSQL(), from, from+int64(m.opts.ChunkSize)); err != nil {
+		if err := m.execChunk(insertSQL(), from, from+int64(m.opts.ChunkSize)); err != nil {
 			return err
 		}
 		chunk++
