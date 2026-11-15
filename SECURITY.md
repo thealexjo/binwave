@@ -21,7 +21,7 @@ binwave is maintained by one person. You can expect an acknowledgement within a 
 
 - **Secrets.** Passwords are passed to the configuration as `${ENV}` variables and are masked in `binwave check --print`; they never appear in logs.
 - **Row values.** The values of replicated rows never go to logs, to `/status` or to metrics; those name the key column only. Values appear only on the control socket.
-- **The control socket.** It is a Unix socket in the state directory, created with mode `0600`: only the user binwave runs as (and root) can pause, resume or resynchronize replication.
+- **The control socket.** It is a Unix socket in the runtime directory (`/run/binwave/binwave.sock` by default), created with mode `0600`: only the user binwave runs as (and root) can pause, resume or resynchronize replication.
 - **The metrics port** (`/metrics`, `/healthz`, `/readyz`, `/status`) has no authentication and listens on `127.0.0.1:9187` by default. Do not expose it beyond a trusted network.
 - **MySQL.** binwave needs only `REPLICATION SLAVE`, `REPLICATION CLIENT` and `SELECT`, and never writes to the source.
 
