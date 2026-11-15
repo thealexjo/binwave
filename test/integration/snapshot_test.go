@@ -310,12 +310,17 @@ func TestASelectAfterTheWatermarkSeesEveryTransactionTheWatermarkHas(t *testing.
 
 	var checks, violations atomic.Int64
 	var readers sync.WaitGroup
-	deadline := time.Now().Add(12 * time.Second)
+	// At least 12 seconds, and on a loaded host longer, until the commits and checks are enough to prove something.
+	least, most := time.Now().Add(12*time.Second), time.Now().Add(time.Minute)
+	enough := func() bool {
+		now := time.Now()
+		return now.After(most) || now.After(least) && checks.Load() >= 500 && written.Load() >= 5000
+	}
 	for r := 0; r < 4; r++ {
 		readers.Add(1)
 		go func() {
 			defer readers.Done()
-			for time.Now().Before(deadline) {
+			for !enough() {
 				mark, err := src.ExecutedGTIDSet(ctx)
 				if err != nil {
 					t.Error(err)
