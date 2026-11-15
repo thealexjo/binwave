@@ -47,7 +47,8 @@ func runTables(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 	configPath := fs.String("config", defaultConfigPath, "path to the configuration file")
 	force := fs.Bool("force", false, "release even if the service seems to be running")
 	acceptGap := fs.Bool("accept-data-gap", false, "release: acknowledge that the changes made while the tables were quarantined stay missing in ClickHouse")
-	if err := fs.Parse(args[1:]); err != nil {
+	positional, err := parseFlags(fs, args[1:])
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
@@ -57,11 +58,11 @@ func runTables(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 		fmt.Fprintf(stderr, "binwave tables %s: --config must not be empty\n", sub)
 		return exitUsage
 	}
-	if sub == "list" && fs.NArg() > 0 {
+	if sub == "list" && len(positional) > 0 {
 		fmt.Fprintln(stderr, "binwave tables list: no positional arguments are accepted")
 		return exitUsage
 	}
-	if (sub == "release" || sub == "resync") && fs.NArg() == 0 {
+	if (sub == "release" || sub == "resync") && len(positional) == 0 {
 		fmt.Fprintf(stderr, "binwave tables %s: name the tables, as database.table\n", sub)
 		return exitUsage
 	}
@@ -112,10 +113,10 @@ func runTables(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 	}
 
 	if sub == "resync" {
-		return resyncTables(ctx, admin, fs.Args(), stdout, stderr)
+		return resyncTables(ctx, admin, positional, repeatFlags(fs, "config"), stdout, stderr)
 	}
 
-	released, unknown, err := admin.Release(ctx, fs.Args(), *force)
+	released, unknown, err := admin.Release(ctx, positional, *force)
 	if err != nil {
 		fmt.Fprintf(stderr, "binwave tables release: %v\n", err)
 		return exitError
@@ -133,7 +134,7 @@ func runTables(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 }
 
 // resyncTables asks for the resyncs and reports which began.
-func resyncTables(ctx context.Context, admin tablesAdmin, tables []string, stdout, stderr io.Writer) int {
+func resyncTables(ctx context.Context, admin tablesAdmin, tables []string, again string, stdout, stderr io.Writer) int {
 	results, err := admin.Resync(ctx, tables)
 	if err != nil {
 		fmt.Fprintf(stderr, "binwave tables resync: %v\n", err)
@@ -146,7 +147,7 @@ func resyncTables(ctx context.Context, admin tablesAdmin, tables []string, stdou
 			code = exitError
 			continue
 		}
-		fmt.Fprintf(stdout, "%s: resync begun. It goes on in the service; `binwave replication status` shows how far it is\n", r.Table)
+		fmt.Fprintf(stdout, "%s: resync begun. It goes on in the service; `binwave replication status%s` shows how far it is\n", r.Table, again)
 	}
 	return code
 }

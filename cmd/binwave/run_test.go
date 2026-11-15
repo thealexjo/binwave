@@ -900,3 +900,96 @@ func TestStatusSaysWhetherTheErrorIsStillHappening(t *testing.T) {
 		})
 	}
 }
+
+// TestFlagsAfterThePositionalArgumentsApplyToTheCommand: a --config after a table name must not leave
+// the command on the default instance, with the flag and its value taken for more tables.
+func TestFlagsAfterThePositionalArgumentsApplyToTheCommand(t *testing.T) {
+	cfg := writeConfig(t, controlConfig)
+	t.Run("tables resync", func(t *testing.T) {
+		admin := &fakeAdmin{}
+		var stdout, stderr bytes.Buffer
+		code := runWith(context.Background(), []string{"tables", "resync", "shop.orders", "--config", cfg}, &stdout, &stderr, tablesDeps(admin))
+		if code != exitOK || strings.Count(stdout.String(), "resync begun") != 1 {
+			t.Errorf("exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+		}
+	})
+	t.Run("tables release", func(t *testing.T) {
+		admin := &fakeAdmin{entries: []checkpoint.Quarantined{{Table: "shop.orders"}}}
+		var stdout, stderr bytes.Buffer
+		code := runWith(context.Background(), []string{"tables", "release", "shop.orders", "--accept-data-gap", "--config", cfg}, &stdout, &stderr, tablesDeps(admin))
+		if code != exitOK || !strings.Contains(stdout.String(), "released shop.orders") || strings.Contains(stdout.String()+stderr.String(), "--config") {
+			t.Errorf("exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+		}
+	})
+	t.Run("replication snapshot-rate", func(t *testing.T) {
+		f := &fakeControl{}
+		var stdout, stderr bytes.Buffer
+		code := runWith(context.Background(), []string{"replication", "snapshot-rate", "100", "--config", cfg}, &stdout, &stderr, controlDeps(f))
+		if code != exitOK || len(f.calls) != 1 || f.calls[0] != "snapshot-rate 100" {
+			t.Errorf("exit %d, calls %v\n%s", code, f.calls, stderr.String())
+		}
+	})
+	t.Run("after --, everything is a table", func(t *testing.T) {
+		admin := &fakeAdmin{}
+		var stdout, stderr bytes.Buffer
+		code := runWith(context.Background(), []string{"tables", "resync", "--config", cfg, "--", "shop.orders", "--force"}, &stdout, &stderr, tablesDeps(admin))
+		if code != exitOK || !strings.Contains(stdout.String(), "--force: resync begun") {
+			t.Errorf("exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+		}
+	})
+}
+
+// TestTheHintsActOnTheInstanceTheCallNamed: a command copied from the hints of a status taken with
+// --config must not skip a transaction of the default instance.
+func TestTheHintsActOnTheInstanceTheCallNamed(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "it's mine")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "other.yaml")
+	if err := os.WriteFile(cfg, []byte(controlConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	quoted := shellQuote(cfg)
+	f := &fakeControl{status: observability.Status{
+		State: observability.StateFailed,
+		Failure: &failinfo.Failure{
+			Time: time.Now(), GTID: "6d4d8f60-1111-2222-3333-444455556666:6", Kind: failinfo.KindRows,
+			Table: "shop.orders", Op: "insert", Rows: 1, Message: "the value cannot be converted",
+		},
+	}}
+	var stdout, stderr bytes.Buffer
+
+	code := runWith(context.Background(), []string{"replication", "status", "--config", cfg}, &stdout, &stderr, controlDeps(f))
+
+	if code != exitOK {
+		t.Fatalf("exit code = %d\n%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"binwave replication resume --config " + quoted + " ",
+		"binwave replication resume --skip-transactions 1 --config " + quoted + " ",
+		"binwave replication resume --gtid-next 6d4d8f60-1111-2222-3333-444455556666:6 --config " + quoted + " ",
+	} {
+		assertContains(t, "stdout", stdout.String(), want)
+	}
+
+	stdout.Reset()
+	if code := runWith(context.Background(), []string{"replication", "pause", "--config", cfg}, &stdout, &stderr, controlDeps(&fakeControl{})); code != exitOK {
+		t.Fatalf("pause: exit code = %d", code)
+	}
+	assertContains(t, "pause stdout", stdout.String(), "`binwave replication resume --config "+quoted+"`")
+}
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/etc/binwave/other.yaml": "/etc/binwave/other.yaml",
+		"/tmp/a b.yaml":           "'/tmp/a b.yaml'",
+		"/tmp/it's.yaml":          `'/tmp/it'\''s.yaml'`,
+		"":                        "''",
+		"$HOME/x":                 "'$HOME/x'",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

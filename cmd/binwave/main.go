@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/thealexjo/binwave/internal/app"
@@ -103,6 +105,47 @@ func printVersion(w io.Writer) {
 		fmt.Fprintln(w, "  "+line)
 	}
 	fmt.Fprintln(w)
+}
+
+// parseFlags parses the flags of fs wherever they are among the positional arguments, as in
+// "tables resync shop.orders --config FILE", and returns the positional ones; after "--" every
+// argument is positional.
+func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, fmt.Errorf("parse flags: %w", err)
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		if len(args) > len(rest) && args[len(args)-len(rest)-1] == "--" {
+			return append(positional, rest...), nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+}
+
+// repeatFlags renders the named flags the call set to other than their default, shell-quoted, for
+// the commands a hint suggests: copied, they act on the same instance as the call.
+func repeatFlags(fs *flag.FlagSet, names ...string) string {
+	var b strings.Builder
+	fs.Visit(func(f *flag.Flag) {
+		if slices.Contains(names, f.Name) && f.Value.String() != f.DefValue {
+			b.WriteString(" --" + f.Name + " " + shellQuote(f.Value.String()))
+		}
+	})
+	return b.String()
+}
+
+// shellQuote quotes s for a POSIX shell, leaving a plain word as it is.
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@%+=,-") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer, deps runDeps) int {

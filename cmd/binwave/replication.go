@@ -83,7 +83,8 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 		fs.IntVar(&req.SkipTransactions, "skip-transactions", 0, "skip this many transactions, starting with the failed one")
 		fs.StringVar(&req.GTIDNext, "gtid-next", "", "skip the transaction with this GTID (uuid:sequence)")
 	}
-	if err := fs.Parse(args[1:]); err != nil {
+	positional, err := parseFlags(fs, args[1:])
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
@@ -94,7 +95,7 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 		return exitUsage
 	}
 	wantPositional := sub == "snapshot-rate" || sub == "chunk-size"
-	if (wantPositional && fs.NArg() != 1) || (!wantPositional && fs.NArg() > 0) {
+	if (wantPositional && len(positional) != 1) || (!wantPositional && len(positional) > 0) {
 		switch sub {
 		case "snapshot-rate":
 			fmt.Fprintln(stderr, "binwave replication snapshot-rate: takes exactly one argument, N or unlimited")
@@ -107,7 +108,7 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	var snapshotRate int
 	if sub == "snapshot-rate" {
-		arg := fs.Arg(0)
+		arg := positional[0]
 		if arg == "unlimited" {
 			snapshotRate = 0
 		} else {
@@ -122,7 +123,7 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 	// 0 is adaptive sizing: the size of a chunk is at least one row, so it is not a size.
 	var chunkSize int
 	if sub == "chunk-size" {
-		arg := fs.Arg(0)
+		arg := positional[0]
 		if arg != "adaptive" {
 			n, err := strconv.Atoi(arg)
 			if err != nil || n < 1 {
@@ -143,13 +144,14 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 		return exitConfig
 	}
 	c := deps.newControl(cfg.Control.Socket)
+	again := repeatFlags(fs, "config")
 
 	switch sub {
 	case "pause":
 		if err := c.Pause(ctx); err != nil {
 			return replicationFailure(stderr, sub, err)
 		}
-		fmt.Fprintln(stdout, "replication is paused. The service is up and reads nothing; `binwave replication resume` starts it again from the saved position.")
+		fmt.Fprintf(stdout, "replication is paused. The service is up and reads nothing; `binwave replication resume%s` starts it again from the saved position.\n", again)
 	case "resume":
 		if err := c.Resume(ctx, req); err != nil {
 			return replicationFailure(stderr, sub, err)
@@ -157,7 +159,7 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 		if req.Skips() {
 			fmt.Fprintln(stdout, "the transactions are skipped: their changes are NOT applied to ClickHouse.")
 		}
-		fmt.Fprintln(stdout, "replication resumes from the saved position; `binwave replication status` shows when it runs.")
+		fmt.Fprintf(stdout, "replication resumes from the saved position; `binwave replication status%s` shows when it runs.\n", again)
 	case "snapshot-rate":
 		if err := c.SnapshotRate(ctx, snapshotRate); err != nil {
 			return replicationFailure(stderr, sub, err)
@@ -181,7 +183,7 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 		if err != nil {
 			return replicationFailure(stderr, sub, err)
 		}
-		printStatus(stdout, st)
+		printStatus(stdout, st, again)
 	}
 	return exitOK
 }
@@ -316,11 +318,13 @@ func replicationFailure(stderr io.Writer, sub string, err error) int {
 	return exitError
 }
 
-func printStatus(w io.Writer, st observability.Status) {
+// printStatus shows the status; again is what the commands it suggests need to reach the same
+// instance (repeatFlags).
+func printStatus(w io.Writer, st observability.Status, again string) {
 	ts := termstyle.For(w)
 	fmt.Fprintf(w, "state:        %s\n", stateText(ts, st.State))
 	if st.Failure != nil {
-		printFailure(w, st)
+		printFailure(w, st, again)
 	}
 	if st.PausedSince != nil {
 		fmt.Fprintf(w, "paused since: %s (%s ago)\n", st.PausedSince.UTC().Format(time.RFC3339), time.Since(*st.PausedSince).Round(time.Second))
@@ -373,7 +377,7 @@ func stateText(ts termstyle.Style, s observability.State) string {
 
 // printFailure describes the failure that stopped replication, and what can be done about it. The
 // values of the key are personal data: this output goes to the operator's terminal, not to a log.
-func printFailure(w io.Writer, st observability.Status) {
+func printFailure(w io.Writer, st observability.Status, again string) {
 	f := st.Failure
 	ts := termstyle.For(w)
 	fmt.Fprintf(w, "failed at:    %s (%s ago)\n", f.Time.UTC().Format(time.RFC3339), time.Since(f.Time).Round(time.Second))
@@ -409,14 +413,22 @@ func printFailure(w io.Writer, st observability.Status) {
 	if f.Detail != "" {
 		fmt.Fprintf(w, "detail:       %s\n", f.Detail)
 	}
-	fmt.Fprintln(w, "what to do:")
-	fmt.Fprintln(w, "  binwave replication resume                        try again, after the cause is fixed")
+	hints := [][2]string{{"binwave replication resume" + again, "try again, after the cause is fixed"}}
 	if f.Kind == failinfo.KindResync {
-		fmt.Fprintln(w, "  set tables.on_replication_error: quarantine       and restart: the resync is given up and the table quarantined")
+		hints = append(hints, [2]string{"set tables.on_replication_error: quarantine", "and restart: the resync is given up and the table quarantined"})
 	}
 	if f.Skippable() {
-		fmt.Fprintln(w, "  binwave replication resume --skip-transactions 1  skip this transaction: its changes are NOT applied to ClickHouse")
-		fmt.Fprintf(w, "  binwave replication resume --gtid-next %s\n                                                    the same, naming the transaction\n", f.GTID)
+		hints = append(hints,
+			[2]string{"binwave replication resume --skip-transactions 1" + again, "skip this transaction: its changes are NOT applied to ClickHouse"},
+			[2]string{"binwave replication resume --gtid-next " + f.GTID + again, "the same, naming the transaction"})
+	}
+	width := 0
+	for _, h := range hints {
+		width = max(width, len(h[0]))
+	}
+	fmt.Fprintln(w, "what to do:")
+	for _, h := range hints {
+		fmt.Fprintf(w, "  %-*s  %s\n", width, h[0], h[1])
 	}
 	fmt.Fprintln(w)
 }
