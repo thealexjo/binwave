@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
@@ -43,12 +44,8 @@ func NewClickHouse(conn Conn, database, table string, now func() time.Time) *Cli
 	return &ClickHouse{conn: conn, database: quote(database), table: quote(database) + "." + quote(table), now: now}
 }
 
-// Init creates the state database and table if they do not exist. It never touches an existing table.
-func (s *ClickHouse) Init(ctx context.Context) error {
-	if err := s.conn.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+s.database); err != nil {
-		return fmt.Errorf("create checkpoint database %s: %w", s.database, err)
-	}
-	err := s.conn.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+s.table+` (
+// stateTable is the definition of the state table, after its name.
+const stateTable = ` (
     id         String,
     seq        UInt64,
     gtid_set   String,
@@ -59,7 +56,19 @@ func (s *ClickHouse) Init(ctx context.Context) error {
     load_total UInt32 DEFAULT 0
 )
 ENGINE = ReplacingMergeTree(seq)
-ORDER BY id`)
+ORDER BY id`
+
+// Init creates the state database and table if they do not exist. It never touches an existing table.
+func (s *ClickHouse) Init(ctx context.Context) error {
+	create := func() error { return s.conn.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+s.table+stateTable) }
+	err := create()
+	if isUnknownDatabase(err) {
+		// Only a database that is not there is created: CREATE DATABASE needs its privilege even when it exists.
+		if err := s.conn.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+s.database); err != nil {
+			return fmt.Errorf("create checkpoint database %s: %w", s.database, err)
+		}
+		err = create()
+	}
 	if err != nil {
 		return fmt.Errorf("create checkpoint table %s: %w", s.table, err)
 	}
@@ -114,4 +123,10 @@ func (s *ClickHouse) Save(ctx context.Context, pos Position) error {
 
 func quote(name string) string {
 	return "`" + strings.ReplaceAll(strings.ReplaceAll(name, `\`, `\\`), "`", "\\`") + "`"
+}
+
+// isUnknownDatabase reports whether ClickHouse refused a statement because its database does not exist.
+func isUnknownDatabase(err error) bool {
+	var exception *clickhouse.Exception
+	return errors.As(err, &exception) && exception.Code == 81 // UNKNOWN_DATABASE
 }

@@ -48,10 +48,10 @@ Nothing else is needed: binwave never writes to MySQL (sessions are opened with 
 CREATE DATABASE replica;  -- service database: the table with the replication position lives here
 
 CREATE USER binwave IDENTIFIED BY '...';
-GRANT CREATE TABLE, INSERT, SELECT, ALTER TABLE, DROP TABLE ON replica.* TO binwave;
+GRANT CREATE TABLE, INSERT, SELECT, ALTER TABLE, DROP TABLE, TRUNCATE ON replica.* TO binwave;
 ```
 
-If `tables.target_database` is not set, the target databases are named like the source databases and are created/checked lazily on the first write into each of them — then the privileges are needed there too (`INSERT`; with auto-DDL on, `CREATE TABLE` and `ALTER TABLE`; and with `ddl.mode: full`, also `DROP TABLE`, because `RENAME TABLE` in ClickHouse requires it on the source table). The simplest way is to grant the same privileges on all databases replication should go to, or to set `tables.target_database` right away so that everything goes into one database with the privileges already granted.
+`ALTER TABLE` on the service database is for the position table, which gets the columns of newer versions at start. If `tables.target_database` is not set, the target databases are named like the source databases and are created/checked lazily on the first write into each of them — then the privileges are needed there too (`INSERT`; with auto-DDL on, `CREATE TABLE` and `ALTER TABLE`; and with `ddl.mode: full`, the default, also `TRUNCATE` and `DROP TABLE`, which `RENAME TABLE` in ClickHouse requires on the source table as well), and `CREATE DATABASE` for a database that does not exist yet. The simplest way is to grant the same privileges on all databases replication should go to, or to set `tables.target_database` right away so that everything goes into one database with the privileges already granted.
 
 A user that reads the replicated tables gets `final = 1`, so that every query sees the last version of each row and no deleted rows (see [Reading the data](../README.md#reading-the-data)):
 

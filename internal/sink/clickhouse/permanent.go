@@ -15,7 +15,7 @@ var permanentCodes = map[int32]string{
 	193: "wrong ClickHouse password",
 	194: "the ClickHouse user requires a password",
 	195: "the ClickHouse user may not connect from this host",
-	497: "the ClickHouse user lacks a required privilege (binwave needs CREATE TABLE, INSERT, SELECT and ALTER TABLE on the target databases, DROP TABLE and TRUNCATE as well with ddl.mode full, which mirrors what the source does to its tables, and CREATE TABLE, INSERT and SELECT on its state database)",
+	497: "the ClickHouse user lacks a required privilege (binwave needs CREATE TABLE, INSERT, SELECT and ALTER TABLE on the target databases, DROP TABLE and TRUNCATE as well with ddl.mode full, which mirrors what the source does to its tables, and CREATE TABLE, ALTER ADD COLUMN, INSERT and SELECT on its state database; CREATE DATABASE only for a database that does not exist)",
 	516: "ClickHouse rejected the login: check target.clickhouse.user and password",
 }
 

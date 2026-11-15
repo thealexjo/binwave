@@ -140,9 +140,9 @@ func (c *Client) Ensure(ctx context.Context, t *Table, ddl DDL) error {
 		return err
 	}
 	if len(actual) == 0 {
-		stmts := []string{"CREATE DATABASE IF NOT EXISTS " + quote(t.Database), t.CreateStatement()}
+		createDB, createTable := "CREATE DATABASE IF NOT EXISTS "+quote(t.Database), t.CreateStatement()
 		if ddl.DryRun {
-			for _, s := range stmts {
+			for _, s := range []string{createDB, createTable} {
 				c.log.Info("dry run: statement not executed", "statement", s)
 			}
 			return &TableError{Table: t.Source.FullName(), Missing: true, Err: fmt.Errorf(
@@ -150,10 +150,16 @@ func (c *Client) Ensure(ctx context.Context, t *Table, ddl DDL) error {
 					"a dry run cannot replicate a table that does not exist yet. "+
 					"ddl.on_missing_structure: quarantine would set the table aside and go on, at the price of the changes made meanwhile", t.FullName())}
 		}
-		for _, s := range stmts {
-			if err := c.conn.Exec(ctx, s); err != nil {
+		err := c.conn.Exec(ctx, createTable)
+		if isUnknownDatabase(err) {
+			// Only a database that is not there is created: CREATE DATABASE needs its privilege even when it exists.
+			if err := c.conn.Exec(ctx, createDB); err != nil {
 				return fmt.Errorf("create table %s: %w", t.FullName(), err)
 			}
+			err = c.conn.Exec(ctx, createTable)
+		}
+		if err != nil {
+			return fmt.Errorf("create table %s: %w", t.FullName(), err)
 		}
 	}
 	if err := c.verify(ctx, t); err != nil {
@@ -267,6 +273,12 @@ func (c *Client) columns(ctx context.Context, database, table string) (map[strin
 		return nil, fmt.Errorf("read columns of %s.%s: %w", database, table, err)
 	}
 	return cols, nil
+}
+
+// isUnknownDatabase reports whether ClickHouse refused a statement because its database does not exist.
+func isUnknownDatabase(err error) bool {
+	var exception *ch.Exception
+	return errors.As(err, &exception) && exception.Code == 81 // UNKNOWN_DATABASE
 }
 
 // binwaveEngine is the engine of every table binwave writes, with the arguments FINAL depends on.

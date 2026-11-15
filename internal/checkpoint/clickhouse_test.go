@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
@@ -42,11 +43,16 @@ type fakeConn struct {
 	args    [][]any
 	row     fakeRow
 	execErr error
+	// execErrs fails the nth Exec (1-based).
+	execErrs map[int]error
 }
 
 func (c *fakeConn) Exec(_ context.Context, query string, args ...any) error {
 	c.execs = append(c.execs, query)
 	c.args = append(c.args, args)
+	if err := c.execErrs[len(c.execs)]; err != nil {
+		return err
+	}
 	return c.execErr
 }
 
@@ -123,21 +129,29 @@ func TestClickHouseFailedSaveDoesNotAdvanceTheSequence(t *testing.T) {
 	}
 }
 
+func TestClickHouseInitCreatesOnlyADatabaseThatIsNotThere(t *testing.T) {
+	conn := &fakeConn{execErrs: map[int]error{1: &clickhouse.Exception{Code: 81, Message: "Database `db` does not exist"}}}
+	if err := NewClickHouse(conn, "db", "state", nil).Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.execs) != 6 || !strings.HasPrefix(conn.execs[1], "CREATE DATABASE IF NOT EXISTS `db`") || !strings.HasPrefix(conn.execs[2], "CREATE TABLE IF NOT EXISTS `db`.`state`") {
+		t.Fatalf("statements = %v, want the table, the database, the table again and three ADD COLUMN", conn.execs)
+	}
+}
+
 func TestClickHouseInitNeverDropsAnything(t *testing.T) {
 	conn := &fakeConn{}
 	if err := NewClickHouse(conn, "we`ird", "state", nil).Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(conn.execs) != 5 {
-		t.Fatalf("Init ran %d statements, want CREATE DATABASE, CREATE TABLE and three ADD COLUMN: %v", len(conn.execs), conn.execs)
+	// The database exists: CREATE DATABASE, which needs its privilege even then, is not run.
+	if len(conn.execs) != 4 {
+		t.Fatalf("Init ran %d statements, want CREATE TABLE and three ADD COLUMN: %v", len(conn.execs), conn.execs)
 	}
-	if !strings.HasPrefix(conn.execs[2], "ALTER TABLE `we\\`ird`.`state` ADD COLUMN IF NOT EXISTS quarantine") {
-		t.Errorf("third statement = %s", conn.execs[2])
-	}
-	if !strings.HasPrefix(conn.execs[0], "CREATE DATABASE IF NOT EXISTS `we\\`ird`") {
+	if !strings.HasPrefix(conn.execs[0], "CREATE TABLE IF NOT EXISTS `we\\`ird`.`state`") {
 		t.Errorf("first statement = %s", conn.execs[0])
 	}
-	if !strings.HasPrefix(conn.execs[1], "CREATE TABLE IF NOT EXISTS `we\\`ird`.`state`") {
+	if !strings.HasPrefix(conn.execs[1], "ALTER TABLE `we\\`ird`.`state` ADD COLUMN IF NOT EXISTS quarantine") {
 		t.Errorf("second statement = %s", conn.execs[1])
 	}
 	for _, stmt := range conn.execs {

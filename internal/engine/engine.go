@@ -321,8 +321,8 @@ func (e *Engine) checkClickHouseAccess(ctx context.Context, sink *chsink.Client)
 	creates := !cfg.DDL.DryRun
 
 	if cfg.Checkpoint.Store == config.CheckpointClickHouse {
-		// The position store creates its table, then reads and writes it.
-		if err := sink.CheckAccess(ctx, cfg.Target.ClickHouse.Database, "CREATE TABLE", "INSERT", "SELECT"); err != nil {
+		// The position store creates its table, adds the columns of newer versions, then reads and writes it.
+		if err := sink.CheckAccess(ctx, cfg.Target.ClickHouse.Database, "CREATE TABLE", "ALTER ADD COLUMN", "INSERT", "SELECT"); err != nil {
 			return err
 		}
 	}

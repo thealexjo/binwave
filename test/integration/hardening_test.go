@@ -525,3 +525,38 @@ func TestTableCreatedAgainWithACascadeIsVettedAgain(t *testing.T) {
 		t.Fatal("the engine kept running with a cascading foreign key in a table created again")
 	}
 }
+
+// TestCheckConnectAsksForThePrivilegesThePositionStoreUses: the store adds its newer columns at
+// every start, which needs ALTER ADD COLUMN on its database even when they are there.
+func TestCheckConnectAsksForThePrivilegesThePositionStoreUses(t *testing.T) {
+	t.Parallel()
+	my := testenv.StartMySQL(t)
+	ch := testenv.StartClickHouse(t)
+	mustExec(t, my, "CREATE TABLE binwave.good (id INT PRIMARY KEY)")
+	execCH(t, ch,
+		"CREATE DATABASE IF NOT EXISTS replica",
+		"CREATE DATABASE binwave_state",
+		"CREATE USER narrow IDENTIFIED WITH plaintext_password BY 'pw'",
+		"GRANT CREATE TABLE, INSERT, SELECT, ALTER TABLE, DROP TABLE, TRUNCATE ON replica.* TO narrow",
+		"GRANT CREATE TABLE, INSERT, SELECT ON binwave_state.* TO narrow",
+	)
+	cfg := engineConfig(t, my, ch, "clickhouse")
+	cfg.Target.ClickHouse.Database = "binwave_state"
+	cfg.Target.ClickHouse.User, cfg.Target.ClickHouse.Password = "narrow", "pw"
+
+	var out bytes.Buffer
+	requireConfigError(t, engine.New(cfg, quietLogger()).Check(context.Background(), &out), "ALTER ADD COLUMN", "binwave_state")
+
+	execCH(t, ch, "GRANT ALTER ADD COLUMN ON binwave_state.* TO narrow")
+	out.Reset()
+	if err := engine.New(cfg, quietLogger()).Check(context.Background(), &out); err != nil {
+		t.Fatalf("Check() = %v\n%s", err, out.String())
+	}
+	// The store's table and the target table are created in databases that exist, without CREATE DATABASE.
+	e := startEngine(t, cfg)
+	mustExec(t, my, "INSERT INTO binwave.good VALUES (1)")
+	waitUntil(t, "the row", 60*time.Second, func() bool { return chRowCount(t, ch, "good") == 1 })
+	if err := e.stop(t); err != nil {
+		t.Errorf("graceful stop returned %v", err)
+	}
+}
