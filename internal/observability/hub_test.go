@@ -255,6 +255,22 @@ func TestTheLoadedPositionIsShownBeforeTheFirstSave(t *testing.T) {
 	}
 }
 
+// TestAnUnknownPositionAgeHasNoValue: before the first save the age of the position is not known, and
+// must not show as the decades since the zero time.
+func TestAnUnknownPositionAgeHasNoValue(t *testing.T) {
+	h, c := newTestHub()
+	h.PositionLoaded(checkpoint.Position{GTIDSet: "u:1-9", Version: 30})
+	if text := scrape(t, h); strings.Contains(text, "binwave_position_saved_age_seconds ") {
+		t.Errorf("the age of a position not saved yet has a value:\n%s", text)
+	}
+
+	h.PositionSaved(checkpoint.Position{GTIDSet: "u:1-9", Version: 31}, c.Now(), time.Time{})
+	c.Advance(5 * time.Second)
+	if got := value(t, scrape(t, h), "binwave_position_saved_age_seconds"); got != "5" {
+		t.Errorf("binwave_position_saved_age_seconds = %s, want 5", got)
+	}
+}
+
 func TestLastErrorIsBoundedAndKeepsValidUTF8(t *testing.T) {
 	h, _ := newTestHub()
 	h.RecordError("startup", errors.New(strings.Repeat("я", 400)))

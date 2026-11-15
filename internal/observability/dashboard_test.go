@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/thealexjo/binwave/internal/checkpoint"
 )
 
 // dashboardPath is the Grafana dashboard shipped with the repository.
@@ -96,6 +99,7 @@ func exportedMetrics(t *testing.T) map[string]bool {
 	h, _ := newTestHub()
 	h.Retry("shop.orders", "overload", nil)
 	h.adjustments.WithLabelValues("zero_date").Inc()
+	h.PositionSaved(checkpoint.Position{GTIDSet: "u:1"}, t0, time.Time{}) // the age of the position has no series before
 
 	families, err := h.Registry().Gather()
 	if err != nil {

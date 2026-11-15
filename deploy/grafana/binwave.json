@@ -575,7 +575,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "time() - binwave_position_commit_timestamp_seconds{$instance_label=~\"$instance\"}",
+          "expr": "time() - (binwave_position_commit_timestamp_seconds{$instance_label=~\"$instance\"} > 0)",
           "legendFormat": "commit age · {{$instance_label}}",
           "refId": "A",
           "range": true

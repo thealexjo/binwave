@@ -243,16 +243,34 @@ func NewHub(opts Options) *Hub {
 			return h.snapshot().degradedFor.Seconds()
 		}),
 		fn("start_time_seconds", "Start time of the process, in Unix seconds.", func() float64 { return float64(h.started.Unix()) }),
-		fn("position_saved_age_seconds", "Seconds since the replication position was last saved; it grows on a quiet source too.", func() float64 {
-			s := h.snapshot()
-			return s.now.Sub(s.positionSaved).Seconds()
-		}),
+		optionalGauge{
+			desc: prometheus.NewDesc("binwave_position_saved_age_seconds", "Seconds since the replication position was last saved; it grows on a quiet source too. "+
+				"Absent until this process saves it for the first time.", nil, nil),
+			value: func() (float64, bool) {
+				s := h.snapshot()
+				return s.now.Sub(s.positionSaved).Seconds(), !s.positionSaved.IsZero()
+			},
+		},
 		fn("position_commit_timestamp_seconds", "When the source committed the last transaction covered by the saved position, in Unix seconds; 0 before the first save.", func() float64 {
 			return h.snapshot().lastCommitUnix
 		}),
 		fn("position_version", "Version (the ReplacingMergeTree version) of the last saved position.", func() float64 { return float64(h.snapshot().position.Version) }),
 	)
 	return h
+}
+
+// optionalGauge is a gauge that has no series while its value is not known.
+type optionalGauge struct {
+	desc  *prometheus.Desc
+	value func() (float64, bool)
+}
+
+func (g optionalGauge) Describe(ch chan<- *prometheus.Desc) { ch <- g.desc }
+
+func (g optionalGauge) Collect(ch chan<- prometheus.Metric) {
+	if v, ok := g.value(); ok {
+		ch <- prometheus.MustNewConstMetric(g.desc, prometheus.GaugeValue, v)
+	}
 }
 
 // Registry is the Prometheus registry behind /metrics.
