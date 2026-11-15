@@ -25,7 +25,7 @@ make test    # unit tests, no Docker
 | `make lint` | golangci-lint with every build tag |
 | `make test` | unit tests with `-race`, no Docker |
 | `make test-integration` | integration tests against containers (Docker) |
-| `make test-e2e` | end-to-end tests: the real binary against containers, failures made by a TCP proxy and signals (Docker, several minutes) |
+| `make test-e2e` | end-to-end tests: the real binary against containers, failures made by a TCP proxy and signals (Docker, several minutes); `E2E_PARALLEL` tests at once, 4 by default, which a Docker host of 8 GB takes |
 | `make test-all` | all three |
 | `make fuzz` | every fuzz test, `FUZZTIME` each (default `30s`) |
 | `make cover` | unit test coverage |

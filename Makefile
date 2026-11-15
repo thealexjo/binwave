@@ -37,9 +37,12 @@ test: ## Run unit tests (no Docker required)
 test-integration: ## Run integration tests against ephemeral containers (Docker required)
 	go test -race -count=1 -tags integration -timeout 15m ./test/integration/...
 
+# Each e2e test runs its own MySQL and ClickHouse; more at once than this exhausts a Docker host of 8 GB.
+E2E_PARALLEL ?= 4
+
 .PHONY: test-e2e
 test-e2e: ## Run end-to-end tests against ephemeral containers (Docker required)
-	go test -race -count=1 -tags e2e -timeout 30m ./test/e2e/...
+	go test -race -count=1 -tags e2e -parallel $(E2E_PARALLEL) -timeout 30m ./test/e2e/...
 
 .PHONY: test-all
 test-all: test test-integration test-e2e ## Run every test suite
