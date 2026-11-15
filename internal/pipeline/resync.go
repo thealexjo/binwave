@@ -1088,8 +1088,17 @@ func (p *Pipeline) startResync(ctx context.Context, name string, def *schema.Tab
 		return fmt.Errorf("the structure of %s in the source is not the one the stream has reached (a change of it is still waiting in the binlog): "+
 			"try again when the stream has caught up", name)
 	}
-	tdb, _ := chsink.TargetName(p.cfg, db, table)
+	tdb, ttable := chsink.TargetName(p.cfg, db, table)
 	shadow := chsink.ShadowName(p.cfg, db, table)
+	// A table that appeared after the start was never checked by the preflight: its swap must not put
+	// its rows in the place of another source table's target or of another resync's shadow table.
+	for _, held := range []string{ttable, shadow} {
+		full := (&chsink.Table{Database: tdb, Name: held}).FullName()
+		if owner, taken := p.ownerOf(full); taken && owner != name {
+			return fmt.Errorf("source tables %s and %s would both be written to ClickHouse table %s; "+
+				"give one of them another name with tables.overrides.<database.table>.target_table", owner, name, full)
+		}
+	}
 
 	// A resync creates a table, fills it, and drops the old one in the swap. Whether the user may is
 	// found out now, not in the middle of the swap, where a refusal would stop the service.

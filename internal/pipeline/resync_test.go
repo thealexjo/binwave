@@ -942,3 +942,46 @@ func TestATableBoundDuringAResyncCannotTakeItsTables(t *testing.T) {
 		})
 	}
 }
+
+// TestStartResyncRefusesATableAnotherSourceTableHolds: a table that appeared after the start was
+// never seen by the preflight, so a resync of it must not take the target of another source table
+// or the shadow table of another resync: its swap would put its rows in the place of the other's.
+func TestStartResyncRefusesATableAnotherSourceTableHolds(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	h.cfg.Tables.TargetDatabase = "replica"
+	h.snapshot = &fakeSnapshot{}
+	p := h.pipeline(t)
+	p.versions = chsink.NewVersioner(0)
+	t.Cleanup(func() {
+		for _, j := range p.resyncs {
+			p.stopJob(j)
+		}
+	})
+	if _, err := p.bind(ctx, itemsTable()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.startResync(ctx, "shop.items", itemsTable(), "", 0, resyncOrigin{}); err != nil {
+		t.Fatalf("startResync(shop.items) = %v", err)
+	}
+
+	other := itemsTable()
+	other.Database = "store" // its target is replica.items, and its shadow that of shop.items
+	shadowNamed := itemsTable()
+	shadowNamed.Name = "items__resync" // its target is the shadow table of shop.items
+	for _, def := range []*schema.Table{other, shadowNamed} {
+		for _, origin := range []resyncOrigin{{}, {autoresync: true}, {initialLoad: true}} {
+			ensures := len(h.sink.ensures)
+			err := p.startResync(ctx, def.FullName(), def, "", 0, origin)
+			if err == nil || !strings.Contains(err.Error(), "shop.items") || !strings.Contains(err.Error(), "target_table") {
+				t.Errorf("startResync(%s, %+v) = %v, want a refusal naming shop.items", def.FullName(), origin, err)
+			}
+			if len(h.sink.ensures) != ensures {
+				t.Errorf("startResync(%s, %+v) created a table before it refused", def.FullName(), origin)
+			}
+			if _, active := p.resyncs[def.FullName()]; active {
+				t.Errorf("%s is being resynchronized", def.FullName())
+			}
+		}
+	}
+}
