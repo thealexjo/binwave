@@ -160,6 +160,11 @@ func planKey(cfg *config.Config, source ddl.Name, shape chsink.TableShape, req *
 // The copy is done inside ClickHouse in one statement, and a transient failure repeats the rebuild,
 // which is safe to repeat at every step.
 func (p *Pipeline) rebuildTable(ctx context.Context, name string, req chsink.RebuildRequest) error {
+	copyName := (&chsink.Table{Database: req.Database, Name: chsink.RebuildName(req.Table)}).FullName()
+	if owner, taken := p.ownerOf(copyName); taken && owner != name {
+		return &chsink.TableError{Table: name, Err: fmt.Errorf("ALTER TABLE %s: the rebuild under the new sort key would fill ClickHouse table %s, which %s is replicated into; "+
+			"give one of them another name with tables.overrides.<database.table>.target_table", name, copyName, owner)}
+	}
 	req.DryRun = p.cfg.DDL.DryRun
 	req.Progress = func(uint64) { p.progress() }
 	p.log.Warn("sort key changed, rebuilding table; replication waits",

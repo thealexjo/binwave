@@ -297,3 +297,25 @@ func TestACopyThatLostRowsFailsReplication(t *testing.T) {
 		t.Error("the position moved past a rebuild that failed")
 	}
 }
+
+// TestARebuildDoesNotFillTheTableOfAnotherSourceTable: shop.items__rebuild, created after the start,
+// is replicated into the table a rebuild of shop.items would fill and swap in.
+func TestARebuildDoesNotFillTheTableOfAnotherSourceTable(t *testing.T) {
+	h := rebuildHarness(t, []string{"id"}, itemColumns)
+	other := itemsTable()
+	other.Name = "items__rebuild"
+	h.source.script = []scriptedTx{
+		tx(1, insertRows(other, 1, "a")),
+		tx(2, alterEvent("ALTER TABLE items DROP PRIMARY KEY, ADD PRIMARY KEY (name, id)")),
+	}
+
+	if err := h.run(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.sink.rebuilds) != 0 {
+		t.Errorf("rebuilt %+v into the table of shop.items__rebuild", h.sink.rebuilds)
+	}
+	if got := quarantinedNames(h.store.current()); !reflect.DeepEqual(got, []string{"shop.items"}) {
+		t.Errorf("quarantined %v, want shop.items", got)
+	}
+}

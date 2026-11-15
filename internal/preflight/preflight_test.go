@@ -205,6 +205,20 @@ func TestATargetThatIsTheShadowOfAnotherIsReported(t *testing.T) {
 	wantProblems(t, r.Problems, "error: table warehouse.items would be replicated into ClickHouse table replica.items__resync, the shadow table of a resync of shop.items")
 }
 
+// TestATargetThatIsTheCopyOfARebuildOfAnotherIsReported: a rebuild of shop.items under a new sort
+// key would fill the table of warehouse.items.
+func TestATargetThatIsTheCopyOfARebuildOfAnotherIsReported(t *testing.T) {
+	cat := &schema.Catalog{Tables: []schema.CatalogTable{
+		table("shop", "items", []string{"id"}, "id"),
+		table("warehouse", "items", []string{"id"}, "id"),
+	}}
+	r := Check(cat, cfgWith(t, func(c *config.Config) {
+		c.Tables.TargetDatabase = "replica"
+		c.Tables.Overrides = map[string]config.TableOverride{"warehouse.items": {TargetTable: "items__rebuild"}}
+	}))
+	wantProblems(t, r.Problems, "error: table warehouse.items would be replicated into ClickHouse table replica.items__rebuild, the copy a rebuild of shop.items fills")
+}
+
 func TestEmptyCatalogAndOrphanOverridesAreOnlyWarnings(t *testing.T) {
 	empty := Check(&schema.Catalog{}, cfgWith(t, nil))
 	wantProblems(t, empty.Problems, "warning: no existing table matches tables.include")

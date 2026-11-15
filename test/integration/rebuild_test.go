@@ -242,6 +242,7 @@ func TestRebuildCanBeRepeatedAtEveryStep(t *testing.T) {
 
 	// A leftover copy with the right key and a partial fill, as a crash in the middle of the copy leaves it.
 	binwaveShaped(t, ch, "t__rebuild", "code", "(2, 'b', 1, 0, now())")
+	markRebuild(t, ch, "t__rebuild")
 
 	if err := client.Rebuild(ctx, req); err != nil {
 		t.Fatal(err)
@@ -265,13 +266,67 @@ func TestRebuildCanBeRepeatedAtEveryStep(t *testing.T) {
 	if err := client.Rebuild(ctx, req); err != nil {
 		t.Fatalf("the second rebuild: %v", err)
 	}
-	// And with the swap done but the old table not yet dropped.
+	// And with the swap done but the old table not yet dropped: the copy, now t, has the marker.
 	binwaveShaped(t, ch, "t__rebuild", "id", "(9, 'old', 1, 0, now())")
+	markRebuild(t, ch, "t")
 	if err := client.Rebuild(ctx, req); err != nil {
 		t.Fatalf("the rebuild after a swap that was not cleaned up: %v", err)
 	}
 	if got := chTables(t, ch); strings.Join(got, ",") != "t" {
 		t.Errorf("tables %v, want only t", got)
+	}
+	if got := chTableComment(t, ch, "t"); got != "" {
+		t.Errorf("the comment of t = %q, want the marker removed", got)
+	}
+}
+
+// markRebuild gives a table the marker of the copy a rebuild makes.
+func markRebuild(t *testing.T, ch *testenv.ClickHouse, table string) {
+	t.Helper()
+	if _, err := ch.DB.Exec("ALTER TABLE replica." + table + " MODIFY COMMENT '" + chsink.RebuildMarker + "'"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func chTableComment(t *testing.T, ch *testenv.ClickHouse, table string) string {
+	t.Helper()
+	var comment string
+	if err := ch.DB.QueryRow("SELECT comment FROM system.tables WHERE database = 'replica' AND name = ?", table).Scan(&comment); err != nil {
+		t.Fatalf("comment of %s: %v", table, err)
+	}
+	return comment
+}
+
+// TestRebuildNeverUsesOrDropsATableItDidNotMake: a t__rebuild without the marker is another table,
+// a replicated one or one made by hand, even with the right key: it is not filled, swapped in or
+// dropped, before the rebuild or after it.
+func TestRebuildNeverUsesOrDropsATableItDidNotMake(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	client := openSink(t, ch)
+	ctx := context.Background()
+	binwaveShaped(t, ch, "t", "id", "(1, 'a', 1, 0, now())")
+	binwaveShaped(t, ch, "t__rebuild", "code", "(7, 'other', 1, 0, now())")
+	req := chsink.RebuildRequest{Source: "s.t", Database: "replica", Table: "t", Key: []string{"code"}}
+
+	err := client.Rebuild(ctx, req)
+	if !chsink.IsConflict(err) || !strings.Contains(err.Error(), "t__rebuild") {
+		t.Fatalf("Rebuild() = %v, want a conflict that names the table", err)
+	}
+	if chSortingKey(t, ch, "t") != "id" || chRowCount(t, ch, "t") != 1 || chRowCount(t, ch, "t__rebuild") != 1 {
+		t.Error("a table was changed")
+	}
+
+	// Rebuilt meanwhile, by hand: the other table stays.
+	if _, err := ch.DB.Exec("DROP TABLE replica.t"); err != nil {
+		t.Fatal(err)
+	}
+	binwaveShaped(t, ch, "t", "code", "(1, 'a', 1, 0, now())")
+	if err := client.Rebuild(ctx, req); err != nil {
+		t.Fatalf("Rebuild() of a table with the new key = %v", err)
+	}
+	if chRowCount(t, ch, "t__rebuild") != 1 {
+		t.Error("the other table was dropped")
 	}
 }
 

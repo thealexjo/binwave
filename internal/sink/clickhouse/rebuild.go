@@ -13,6 +13,12 @@ import (
 // rebuildSuffix names the table a rebuild fills before it takes the place of the original.
 const rebuildSuffix = "__rebuild"
 
+// RebuildMarker is the comment of the table a rebuild fills; it travels with the table in the swap.
+const RebuildMarker = "binwave: rebuild"
+
+// RebuildName is the name of the table a rebuild of table fills.
+func RebuildName(table string) string { return table + rebuildSuffix }
+
 // TableShape is what the pipeline needs to know about a ClickHouse table to decide whether a change
 // of the source touches its sort key.
 type TableShape struct {
@@ -96,7 +102,7 @@ type RebuildRequest struct {
 // __rebuild table of another key, or a copy that lost rows, is a *ConflictError.
 func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 	table := quote(req.Database) + "." + quote(req.Table)
-	tmpName := req.Table + rebuildSuffix
+	tmpName := RebuildName(req.Table)
 	tmp := quote(req.Database) + "." + quote(tmpName)
 	fail := func(format string, args ...any) error {
 		return &TableError{Table: req.Source, Err: fmt.Errorf(format, args...)}
@@ -115,15 +121,20 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 	}
 	current := splitKey(sortingKey)
 
-	// Done already (a replay after a crash)?
+	// Done already (a replay after a crash)? The table has the marker when the swap was made and the
+	// old table, under the other name, is still to be dropped.
 	if c.rebuilt(defs, current, req) {
-		return c.dropLeftover(ctx, req, tmp)
+		comment, _, err := c.tableComment(ctx, req.Database, req.Table)
+		if err != nil || comment != RebuildMarker {
+			return err
+		}
+		return c.dropLeftover(ctx, req, table, tmp)
 	}
 
 	// Only a table of the shape binwave creates is rebuilt by binwave.
 	switch {
-	case !strings.HasPrefix(engineFull, "ReplacingMergeTree"):
-		return fail("table %s is not a ReplacingMergeTree, so binwave does not rebuild it under a new sort key; rebuild it by hand", table)
+	case !isBinwaveEngine(engineFull):
+		return fail("table %s is not a %s, so binwave does not rebuild it under a new sort key; rebuild it by hand", table, binwaveEngine)
 	case partitionKey != "" || strings.Contains(engineFull, " TTL "):
 		return fail("table %s has a partition key or a TTL, which binwave does not carry over when it rebuilds a table under a new sort key; rebuild it by hand", table)
 	}
@@ -204,14 +215,15 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 	}
 
 	createStmt := "CREATE TABLE " + tmp + " (" + strings.Join(created, ", ") + ") ENGINE = ReplacingMergeTree(" +
-		quote(ColVersion) + ", " + quote(ColIsDeleted) + ") ORDER BY (" + strings.Join(quotedKey, ", ") + ")"
+		quote(ColVersion) + ", " + quote(ColIsDeleted) + ") ORDER BY (" + strings.Join(quotedKey, ", ") + ") COMMENT '" + RebuildMarker + "'"
 	copyStmt := "INSERT INTO " + tmp + " (" + strings.Join(insert, ", ") + ") SELECT " + strings.Join(selects, ", ") +
 		" FROM " + table + " FINAL WHERE " + quote(ColIsDeleted) + " = 0"
 	exchangeStmt := "EXCHANGE TABLES " + table + " AND " + tmp
 	dropStmt := "DROP TABLE IF EXISTS " + tmp
+	unmarkStmt := "ALTER TABLE " + table + " MODIFY COMMENT ''"
 
 	if req.DryRun {
-		for _, s := range []string{createStmt, copyStmt, exchangeStmt, dropStmt} {
+		for _, s := range []string{createStmt, copyStmt, exchangeStmt, dropStmt, unmarkStmt} {
 			c.log.Info("dry run: statement not executed", "statement", s)
 		}
 		return &TableError{Table: req.Source, Missing: true, Err: fmt.Errorf(
@@ -219,10 +231,19 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 				"ddl.on_missing_structure: quarantine would set the table aside and go on, at the price of the changes made meanwhile", table, strings.Join(req.Key, ", "))}
 	}
 
-	// A leftover of an earlier attempt is reused when it has the key we want, and never touched otherwise.
+	// A leftover of an earlier attempt is reused when it has the marker and the key we want, and never
+	// touched otherwise: a table of that name without the marker is not binwave's copy.
 	if have, err := c.Shape(ctx, req.Database, tmpName); err != nil {
 		return err
 	} else if have.Exists {
+		comment, _, err := c.tableComment(ctx, req.Database, tmpName)
+		if err != nil {
+			return err
+		}
+		if comment != RebuildMarker {
+			return &ConflictError{Err: fmt.Errorf("ClickHouse has the table %s, which is not a copy made by a rebuild of %s; "+
+				"binwave does not drop or reuse it: rename or drop it in ClickHouse and resume", tmp, table)}
+		}
 		if !sameKey(have.Key, req.Key) {
 			return &ConflictError{Err: fmt.Errorf("ClickHouse has the table %s, left by a rebuild of %s under another sort key (%s); "+
 				"binwave does not drop or reuse it: drop it in ClickHouse and resume", tmp, table, strings.Join(have.Key, ", "))}
@@ -271,10 +292,7 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 		return c.classifyRebuild(req, err)
 	}
 	c.log.Info("table rebuilt under the new sort key", "table", table, "sort_key", strings.Join(req.Key, ", "), "rows", live)
-	if err := c.exec(ctx, dropStmt); err != nil {
-		return c.classifyRebuild(req, err)
-	}
-	return nil
+	return c.dropLeftover(ctx, req, table, tmp)
 }
 
 func (c *Client) exec(ctx context.Context, stmt string) error {
@@ -331,12 +349,19 @@ func (c *Client) rebuilt(defs []columnDef, current []string, req RebuildRequest)
 	return true
 }
 
-// dropLeftover removes the table left by a rebuild that was swapped in but not yet cleaned up.
-func (c *Client) dropLeftover(ctx context.Context, req RebuildRequest, tmp string) error {
+// dropLeftover drops the old table after the swap, now under the name of the copy, and then removes
+// the marker from the table, which ends the rebuild.
+func (c *Client) dropLeftover(ctx context.Context, req RebuildRequest, table, tmp string) error {
 	if req.DryRun {
 		return nil
 	}
-	return c.exec(ctx, "DROP TABLE IF EXISTS "+tmp)
+	if err := c.exec(ctx, "DROP TABLE IF EXISTS "+tmp); err != nil {
+		return c.classifyRebuild(req, err)
+	}
+	if err := c.exec(ctx, "ALTER TABLE "+table+" MODIFY COMMENT ''"); err != nil {
+		return c.classifyRebuild(req, err)
+	}
+	return nil
 }
 
 func sameKey(a, b []string) bool {

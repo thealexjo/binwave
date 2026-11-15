@@ -54,7 +54,7 @@ They lead to a quarantine (`tables.on_replication_error: quarantine`, the defaul
 | `TBL203` | `overrides` names a column that does not exist | — (configuration error) | fix the config |
 | `TBL204` | all columns are excluded | — (configuration error) | fix `exclude_columns` |
 | `TBL301` | a foreign key with `ON DELETE`/`ON UPDATE CASCADE`/`SET NULL`/`SET DEFAULT` | no | set `tables.foreign_key_cascades: warn` deliberately, or remove the cascade in the source |
-| `TBL401` | two source tables point to one ClickHouse table, or one to the shadow table (`<table>__resync`) of the other | — (configuration error) | separate them with `tables.overrides.<t>.target_table` or `tables.database_map` |
+| `TBL401` | two source tables point to one ClickHouse table, or one to the shadow table (`<table>__resync`) or the rebuild copy (`<table>__rebuild`) of the other | — (configuration error) | separate them with `tables.overrides.<t>.target_table` or `tables.database_map` |
 | `TBL501` | the source server may write wrong values of the column into the binlog, by a known bug of its version: a `COLUMN_FORMAT COMPRESSED` column of a partitioned table on Percona Server before 8.0.35 (PS-7806: a statement that reads the table in index order across partitions, such as a `DELETE`) | no | upgrade the source to Percona Server 8.0.35-27 or newer, remove the compression (`MODIFY ... COLUMN_FORMAT DEFAULT`) or exclude the column (`exclude_columns`); then `binwave tables resync` |
 
 ## `DDL` — schema changes in the stream
