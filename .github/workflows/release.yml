@@ -16,8 +16,7 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  # The tagged commit must be on main and have passed the whole CI there, the run by hand with every
-  # pair of versions; this is the last quick check.
+  # The tagged commit must be on main and have passed the whole CI there; this is the last quick check.
   check:
     runs-on: ubuntu-latest
     permissions:
@@ -37,9 +36,9 @@ jobs:
             echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not a commit of main"
             exit 1
           fi
-          passed=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event workflow_dispatch --status success --json databaseId --jq length)
+          passed=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push --status success --json databaseId --jq length)
           if [ "$passed" -eq 0 ]; then
-            echo "::error::the whole CI has not passed on $GITHUB_SHA: run it (gh workflow run ci.yml --ref main), wait for it to finish, then run this release again"
+            echo "::error::CI has not passed on $GITHUB_SHA: wait for it to finish, then run this release again"
             exit 1
           fi
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

@@ -1,30 +1,15 @@
 name: CI
 
-# A push or a pull request runs one pair of versions; the whole matrix and the fuzz tests run by hand
-# (gh workflow run ci.yml), and a release needs that run on its commit.
 on:
   push:
     branches: [main]
-    paths:
-      - "**"
-      - "!**.md"
-      - "!docs/**"
-      - "!.github/ISSUE_TEMPLATE/**"
-      - "docs/reference/**" # error-codes.md is checked by a test
   pull_request:
-    paths:
-      - "**"
-      - "!**.md"
-      - "!docs/**"
-      - "!.github/ISSUE_TEMPLATE/**"
-      - "docs/reference/**"
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -56,8 +41,7 @@ jobs:
       - run: make build
       - run: make verify-systemd
       - run: make cover
-      - if: github.event_name == 'workflow_dispatch'
-        run: make fuzz FUZZTIME=10s
+      - run: make fuzz FUZZTIME=10s
 
   docker:
     needs: unit
@@ -75,9 +59,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # By hand: MySQL 8.4 with every ClickHouse LTS, the lowest supported 8.0 and Percona Server with
-        # the newest. On a push: MySQL 8.4 with the newest.
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '[{"mysql":"mysql:8.4","clickhouse":"clickhouse/clickhouse-server:25.8"},{"mysql":"mysql:8.4","clickhouse":"clickhouse/clickhouse-server:26.8"},{"mysql":"mysql:8.0.23","clickhouse":"clickhouse/clickhouse-server:26.8"},{"mysql":"percona:ps-8.0.28-20","clickhouse":"clickhouse/clickhouse-server:26.8"}]' || '[{"mysql":"mysql:8.4","clickhouse":"clickhouse/clickhouse-server:26.8"}]') }}
+        # MySQL 8.4 with every ClickHouse LTS; the lowest supported 8.0 and Percona Server with the newest.
+        mysql: ["mysql:8.4"]
+        clickhouse: ["clickhouse/clickhouse-server:25.8", "clickhouse/clickhouse-server:26.8"]
+        include:
+          - {mysql: "mysql:8.0.23", clickhouse: "clickhouse/clickhouse-server:26.8"}
+          - {mysql: "percona:ps-8.0.28-20", clickhouse: "clickhouse/clickhouse-server:26.8"}
     name: integration (${{ matrix.mysql }}, ${{ matrix.clickhouse }})
     env:
       BINWAVE_TEST_MYSQL_IMAGE: ${{ matrix.mysql }}
