@@ -391,10 +391,12 @@ func (p *Pipeline) SaveQuarantine(ctx context.Context) error {
 	if !found {
 		return nil // nothing has been saved yet; the list is saved with the first position
 	}
+	// Cleared before the list is taken: a table set aside meanwhile sets it again, for the next save.
+	p.qChanged.Store(false)
 	pos.Quarantine = p.q.encode()
 	if err := p.d.Store.Save(ctx, pos); err != nil {
+		p.qChanged.Store(true)
 		return fmt.Errorf("save the quarantine list: %w", err)
 	}
-	p.qChanged.Store(false)
 	return nil
 }

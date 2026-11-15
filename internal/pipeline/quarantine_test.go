@@ -628,3 +628,35 @@ func TestAGuardProblemUnderStopEndsTheServiceRatherThanFailingReplication(t *tes
 		t.Errorf("Run() = %v, must not be a FailedError: that state's remedy (skip a transaction) cannot fix a property of the table itself", err)
 	}
 }
+
+// TestATableQuarantinedDuringTheSaveOfTheListIsSavedLater: the list saved is the one encoded before
+// the save, so a table set aside meanwhile is left to the next save, which the flag asks for.
+func TestATableQuarantinedDuringTheSaveOfTheListIsSavedLater(t *testing.T) {
+	for _, saveFails := range []bool{false, true} {
+		h := newHarness(t)
+		h.store.pos, h.store.found = checkpoint.Position{GTIDSet: "u:1-7", Version: 70}, true
+		p := h.pipeline(t)
+		ctx := t.Context()
+		if err := p.Prepare(ctx); err != nil {
+			t.Fatal(err)
+		}
+		p.quarantine("shop.items", errcode.TBL101, "no primary key", false)
+		h.store.onSave = func(checkpoint.Position) {
+			h.store.onSave = nil
+			p.quarantine("shop.orders", errcode.TBL101, "no primary key", false) // the preflight, meanwhile
+		}
+		if saveFails {
+			h.store.saveErrs = map[int]error{1: errors.New("the store is down")}
+			h.store.onSave = nil
+		}
+
+		err := p.SaveQuarantine(ctx)
+
+		if saveFails != (err != nil) {
+			t.Fatalf("save fails %v: SaveQuarantine() = %v", saveFails, err)
+		}
+		if !p.qChanged.Load() {
+			t.Errorf("save fails %v: the list is marked saved, though it changed during the save or was not saved", saveFails)
+		}
+	}
+}
