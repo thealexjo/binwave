@@ -88,9 +88,9 @@ func TestPauseKeepsTheServiceUpAndResumeLosesNothing(t *testing.T) {
 	}
 	waitForConvergence(t, my, ch)
 	waitUntil(t, "the service to be ready again", 30*time.Second, func() bool { return e.hub.Status().State == observability.StateReady })
-	if got, want := loadPosition(t, ch, cfg).GTIDSet, executedGTIDs(t, my); got != want {
-		t.Errorf("position after the resume = %q, want %q", got, want)
-	}
+	// The rows come first; the position follows on the next save.
+	want := executedGTIDs(t, my)
+	waitUntil(t, "the position to reach "+want, 30*time.Second, func() bool { return loadPosition(t, ch, cfg).GTIDSet == want })
 	e.stillRunning(t)
 
 	// And it can pause and resume again.
