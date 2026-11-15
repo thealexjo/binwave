@@ -1059,6 +1059,22 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+// TestCheckPrintAndConnectDoesBoth: --print must not skip the check of the databases --connect asks for.
+func TestCheckPrintAndConnectDoesBoth(t *testing.T) {
+	deps := depsWith(nil, nil)
+	deps.newChecker = func(*config.Config, *slog.Logger) (checker, error) {
+		return checkerFunc(func(context.Context, io.Writer) error { return errors.New("connection refused") }), nil
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := runWith(context.Background(), []string{"check", "--config", writeConfig(t, validConfig), "--print", "--connect"}, &stdout, &stderr, deps)
+
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d: the database that cannot be reached was not checked", code, exitError)
+	}
+	assertContains(t, "stdout", stdout.String(), "server_id: 1")
+}
+
 // TestTheCommandsOfTheHelpAreAligned: every description starts in the same column.
 func TestTheCommandsOfTheHelpAreAligned(t *testing.T) {
 	var stdout, stderr bytes.Buffer

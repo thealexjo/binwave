@@ -185,10 +185,9 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer, deps
 			return exitError
 		}
 		_, _ = stdout.Write(out)
-		return exitOK
+	} else {
+		fmt.Fprintf(stdout, "config %s is valid\n", *configPath)
 	}
-
-	fmt.Fprintf(stdout, "config %s is valid\n", *configPath)
 	if !*connect {
 		return exitOK
 	}
