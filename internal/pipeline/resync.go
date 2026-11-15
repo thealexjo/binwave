@@ -112,8 +112,9 @@ type resyncSet struct {
 }
 
 // StartResync begins a resync of the table. It returns when the pipeline has begun it (at the next
-// transaction boundary or heartbeat of the stream), or with the reason it cannot. Safe to call from any
-// goroutine.
+// transaction boundary or heartbeat of the stream), or with the reason it cannot. When ctx ends first,
+// the request is withdrawn, unless the pipeline has taken it already: then its answer is returned, so
+// the caller is never told a resync did not begin that does. Safe to call from any goroutine.
 func (p *Pipeline) StartResync(ctx context.Context, table string) error {
 	if p.d.Snapshot == nil {
 		return errors.New("this service has no source to read a snapshot from")
@@ -137,8 +138,17 @@ func (p *Pipeline) StartResync(ctx context.Context, table string) error {
 	case err := <-req.reply:
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("wait for the resync to begin: %w", ctx.Err())
 	}
+	p.rs.mu.Lock()
+	for i, q := range p.rs.queue {
+		if q.reply == req.reply {
+			p.rs.queue = append(p.rs.queue[:i], p.rs.queue[i+1:]...)
+			p.rs.mu.Unlock()
+			return fmt.Errorf("wait for the resync to begin: %w", ctx.Err())
+		}
+	}
+	p.rs.mu.Unlock()
+	return <-req.reply
 }
 
 // SetLoadRate changes the combined speed limit of the initial load while it runs; 0 removes it. It

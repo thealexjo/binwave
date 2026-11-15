@@ -1010,3 +1010,51 @@ func TestPartitionStatementsThatRemoveRowsDiscardAResync(t *testing.T) {
 		}
 	}
 }
+
+// TestACancelledResyncRequestIsNotBegunLater: the operator was told the resync did not begin, so it
+// must not begin when the pipeline comes to its queue after the request gave up.
+func TestACancelledResyncRequestIsNotBegunLater(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	h.obs = &fakeObserver{}
+	p := h.pipeline(t)
+	var asked error
+	h.source.script = []scriptedTx{
+		uuidTx(1, insertRows(items, 1, "a")),
+		uuidTx(2, insertRows(items, 2, "b")),
+		uuidTx(3, insertRows(items, 3, "c")),
+	}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); !ok || b.GTID != testUUID+":2" {
+			return
+		}
+		// The pipeline goroutine is here, so it cannot take the request while it waits.
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- p.StartResync(ctx, "shop.items") }()
+		for !p.requested() {
+			time.Sleep(time.Millisecond)
+		}
+		cancel()
+		asked = <-done
+	}
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if !errors.Is(asked, context.Canceled) {
+		t.Fatalf("StartResync() = %v, want the cancellation", asked)
+	}
+	if p.requested() {
+		t.Error("the cancelled request is still in the queue")
+	}
+	for _, e := range h.journal.all() {
+		if strings.Contains(e, "__resync") {
+			t.Errorf("%s: a resync began after its request gave up", e)
+		}
+	}
+	if got := h.obs.(*fakeObserver).sequence("resync-rows"); len(got) > 0 {
+		t.Errorf("%v: a resync read the table after its request gave up", got)
+	}
+}
