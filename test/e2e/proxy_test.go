@@ -3,11 +3,45 @@
 package e2e
 
 import (
+	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"testing"
 )
+
+// The ports of the proxies are below the ephemeral range of Linux (32768) and macOS (49152), where
+// outgoing connections and Docker take theirs, and each one is a proxy's for the life of the process:
+// a proxy that refuses gives its port up, and must get the same one back when it resumes.
+const (
+	proxyPortMin = 20000
+	proxyPortMax = 32767
+)
+
+var proxyPorts = struct {
+	sync.Mutex
+	taken map[int]bool
+}{taken: map[int]bool{}}
+
+// listenProxyPort listens on a port of its own in the proxy range.
+func listenProxyPort() (net.Listener, error) {
+	proxyPorts.Lock()
+	defer proxyPorts.Unlock()
+	for range 100 {
+		port := proxyPortMin + rand.IntN(proxyPortMax-proxyPortMin+1)
+		if proxyPorts.taken[port] {
+			continue
+		}
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		proxyPorts.taken[port] = true
+		return ln, nil
+	}
+	return nil, fmt.Errorf("no free port in %d-%d", proxyPortMin, proxyPortMax)
+}
 
 // proxy is a TCP forwarder that can fail on demand. binwave talks to MySQL and ClickHouse through
 // one, so a scenario can cut a database off in the ways a network does: refusing connections,
@@ -27,7 +61,7 @@ type proxy struct {
 func newProxy(t *testing.T, target string) *proxy {
 	t.Helper()
 	p := &proxy{t: t, target: target, conns: map[net.Conn]struct{}{}}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := listenProxyPort()
 	if err != nil {
 		t.Fatal(err)
 	}
