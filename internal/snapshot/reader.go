@@ -181,9 +181,8 @@ func (r *Reader) Next(ctx context.Context) (Chunk, error) {
 	partition := r.partition()
 	rows, size, err := r.src.ReadChunk(ctx, ChunkRequest{Table: r.tbl, Partition: partition, After: r.cursor, Limit: limit})
 	if errors.Is(err, ErrPartitionGone) {
-		// Nothing to read and nothing to fix: the rows of that partition are not in the source any
-		// more, and the statement that dropped them is in the stream. Whatever was read of it stays in
-		// the shadow table and is removed by that statement, or was never there.
+		// Nothing to read: the rows of that partition are not in the source any more, and the
+		// statement that dropped them is in the stream, where it discards the resync and begins it again.
 		chunk := Chunk{Watermark: watermark, Limit: limit, Partition: partition}
 		r.endOfScope(&chunk)
 		return chunk, nil

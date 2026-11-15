@@ -1389,11 +1389,15 @@ func (p *Pipeline) resyncImpacts(e event.DDL) []resyncImpact {
 }
 
 // onlyIgnorable reports whether an ALTER TABLE changes nothing a snapshot depends on (an index, a table
-// option, a partition): the rows and the columns are what they were.
+// option, a partition operation that keeps the rows): the rows and the columns are what they were.
 func onlyIgnorable(a ddl.AlterTable) bool {
 	for _, spec := range a.Specs {
-		switch spec.(type) {
-		case ddl.Ignored, ddl.PartitionOp:
+		switch s := spec.(type) {
+		case ddl.Ignored:
+		case ddl.PartitionOp:
+			if s.Destructive {
+				return false // its rows are gone from the source and stay in ClickHouse, the shadow table included
+			}
 		default:
 			return false
 		}

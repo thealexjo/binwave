@@ -985,3 +985,28 @@ func TestStartResyncRefusesATableAnotherSourceTableHolds(t *testing.T) {
 		}
 	}
 }
+
+// TestPartitionStatementsThatRemoveRowsDiscardAResync: the rows of a dropped partition that the
+// resync already read would stay in the shadow table, since the statement is not applied in
+// ClickHouse; a partition statement that keeps the rows changes nothing a snapshot depends on.
+func TestPartitionStatementsThatRemoveRowsDiscardAResync(t *testing.T) {
+	h := newHarness(t)
+	p := h.pipeline(t)
+	p.resyncs["shop.items"] = &resyncJob{}
+	for _, tc := range []struct {
+		query   string
+		discard bool
+	}{
+		{"ALTER TABLE items DROP PARTITION p1", true},
+		{"ALTER TABLE items TRUNCATE PARTITION p1", true},
+		{"ALTER TABLE items EXCHANGE PARTITION p1 WITH TABLE store.items", true},
+		{"ALTER TABLE items ADD PARTITION (PARTITION p3 VALUES LESS THAN (300))", false},
+		{"ALTER TABLE items REORGANIZE PARTITION p1 INTO (PARTITION p1 VALUES LESS THAN (10))", false},
+		{"ALTER TABLE items ADD INDEX i (name)", false},
+	} {
+		got := p.resyncImpacts(event.DDL{Database: "shop", Query: tc.query})
+		if discard := len(got) == 1 && got[0].table == "shop.items" && got[0].restart; discard != tc.discard {
+			t.Errorf("%s: impacts = %+v, want the resync discarded: %v", tc.query, got, tc.discard)
+		}
+	}
+}
