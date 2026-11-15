@@ -34,7 +34,6 @@ binwave connects to MySQL as a replica, reads the binlog by GTID and writes ever
 - No ClickHouse cluster support yet.
 - Changes MySQL makes through foreign key cascades are not replicated.
 - Dropping or emptying a partition in MySQL is not mirrored yet.
-- A mirror, not a backup: what is deleted in MySQL is deleted in ClickHouse.
 
 ## Quick start
 
