@@ -25,7 +25,7 @@ binwave connects to MySQL as a replica, reads the binlog by GTID and writes ever
 
 ## Requirements
 
-- MySQL 8.0.23+ (except 8.0.29) or 8.4 LTS, with `binlog_format=ROW`, `binlog_row_image=FULL`, `binlog_row_metadata=FULL` and `gtid_mode=ON`. binwave checks them at start and names what is missing.
+- MySQL 8.0.23+ (except 8.0.29) or 8.4 LTS, with `binlog_format=ROW`, `binlog_row_image=FULL`, `binlog_row_metadata=FULL`, `gtid_mode=ON` and `log_replica_updates=ON`. binwave checks them at start and names what is missing.
 - ClickHouse 25.8 or 26.8.
 - A MySQL user with `REPLICATION SLAVE`, `REPLICATION CLIENT` and `SELECT`.
 

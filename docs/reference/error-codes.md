@@ -20,6 +20,7 @@ The requirements are checked at start (`internal/source/mysql/requirements.go`).
 | `SRC106` | `binlog_row_value_options` contains `PARTIAL_JSON` | remove `PARTIAL_JSON` — otherwise the binlog carries JSON diffs instead of values |
 | `SRC107` | `log_bin` is not `ON` | enable the binlog on the source itself (for a replica this is not the same as replication from the primary, see `docs/deployment.md`) |
 | `SRC108` | `binlog_order_commits` is not `ON` on MySQL before 8.0.33 | set `binlog_order_commits=ON` (the default): before 8.0.33 unordered commits can leave a transaction out of the GTID set of the next binary log, and a reconnect would skip it |
+| `SRC109` | `log_replica_updates` is not `ON` (`log_slave_updates` before 8.0.26) | set it to `ON` (the default): a replica that does not write what it applies into its own binlog moves its GTID set past changes binwave never sees |
 | `SRC201` | unsupported MySQL version or MariaDB | MySQL 8.0.23+ (the 8.0 line, except the withdrawn 8.0.29) or 8.4 LTS is required |
 | `SRC301` | `REPLICATION SLAVE`/`REPLICATION CLIENT`/`SELECT` is missing | grant the privileges to the binwave user |
 | `SRC401` | the required binlog position is already purged (error 1236) | a resync from scratch (`initial_position`) or a longer `binlog_expire_logs_seconds` on the source is needed |

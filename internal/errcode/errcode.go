@@ -29,6 +29,7 @@ const (
 	SRC106 Code = "SRC106" // binlog_row_value_options contains PARTIAL_JSON
 	SRC107 Code = "SRC107" // log_bin is not ON
 	SRC108 Code = "SRC108" // binlog_order_commits is not ON on MySQL before 8.0.33
+	SRC109 Code = "SRC109" // log_replica_updates is not ON
 	SRC201 Code = "SRC201" // unsupported MySQL version, or MariaDB
 	SRC301 Code = "SRC301" // a required privilege is missing (REPLICATION SLAVE/CLIENT, SELECT)
 	SRC401 Code = "SRC401" // the binlog position needed is already purged (error 1236)
@@ -134,7 +135,7 @@ const (
 
 // All lists every code, for TestEveryCodeIsDocumented to check against docs/reference/error-codes.md.
 var All = []Code{
-	SRC101, SRC102, SRC103, SRC104, SRC105, SRC106, SRC107, SRC108, SRC201, SRC301, SRC401, SRC501, SRC502,
+	SRC101, SRC102, SRC103, SRC104, SRC105, SRC106, SRC107, SRC108, SRC109, SRC201, SRC301, SRC401, SRC501, SRC502,
 	TGT101, TGT102, TGT201, TGT301, TGT302,
 	TBL101, TBL102, TBL103, TBL104, TBL105, TBL106, TBL201, TBL202, TBL203, TBL204, TBL301, TBL401, TBL501,
 	DDL101, DDL102, DDL201, DDL202, DDL301, DDL401,

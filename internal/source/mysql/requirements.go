@@ -13,6 +13,8 @@ import (
 // requirement is one server variable binwave depends on.
 type requirement struct {
 	name string
+	// alias is the older name of the variable, read on a server that does not have name.
+	alias string
 	// ok reports whether the variable value (upper-cased) is acceptable; missing is true when the server does not have the variable.
 	ok   func(value string, missing bool) bool
 	want string
@@ -46,6 +48,10 @@ var requirements = []requirement{
 		name: "binlog_order_commits", ok: equals("ON"), want: "ON",
 		why:   "before MySQL 8.0.33 unordered commits can leave a transaction out of the GTID set of the next binary log, and a reconnect would skip it",
 		below: &serverVersion{8, 0, 33},
+	},
+	{
+		name: "log_replica_updates", alias: "log_slave_updates", ok: equals("ON"), want: "ON",
+		why: "a replica that does not write what it applies into its own binary log moves its GTID set past changes binwave never sees",
 	},
 }
 
@@ -121,6 +127,9 @@ func checkVariables(vars map[string]string) error {
 			continue
 		}
 		value, present := vars[r.name]
+		if !present && r.alias != "" {
+			value, present = vars[r.alias]
+		}
 		if r.ok(strings.ToUpper(value), !present) {
 			continue
 		}
@@ -146,6 +155,9 @@ func readVariables(ctx context.Context, db *sql.DB) (map[string]string, error) {
 	names := []string{"'version'"}
 	for _, r := range requirements {
 		names = append(names, "'"+r.name+"'")
+		if r.alias != "" {
+			names = append(names, "'"+r.alias+"'")
+		}
 	}
 	sort.Strings(names)
 

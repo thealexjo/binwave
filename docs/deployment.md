@@ -15,7 +15,7 @@ binwave connects to the MySQL server named in the config and checks the requirem
 
 ```sql
 SHOW VARIABLES LIKE 'log_bin';                    -- ON
-SHOW VARIABLES LIKE 'log_slave_updates';           -- ON, when binwave reads from a replica
+SHOW VARIABLES LIKE 'log_replica_updates';         -- ON (log_slave_updates before 8.0.26)
 SHOW VARIABLES LIKE 'binlog_format';               -- ROW
 SHOW VARIABLES LIKE 'binlog_row_image';            -- FULL
 SHOW VARIABLES LIKE 'binlog_row_metadata';         -- FULL

@@ -16,6 +16,7 @@ func goodVars() map[string]string {
 		"enforce_gtid_consistency": "ON",
 		"binlog_row_value_options": "",
 		"binlog_order_commits":     "ON",
+		"log_replica_updates":      "ON",
 	}
 }
 
@@ -52,6 +53,11 @@ func TestCheckVariablesRejectsViolations(t *testing.T) {
 		{"partial json among options", func(v map[string]string) { v["binlog_row_value_options"] = "foo,partial_json" }, "PARTIAL_JSON"},
 		{"unordered commits before 8.0.33", func(v map[string]string) { v["version"] = "8.0.32"; v["binlog_order_commits"] = "OFF" }, "binlog_order_commits must be ON"},
 		{"unordered commits, version unknown", func(v map[string]string) { v["binlog_order_commits"] = "OFF" }, "binlog_order_commits must be ON"},
+		{"replica updates off", func(v map[string]string) { v["log_replica_updates"] = "OFF" }, "log_replica_updates must be ON"},
+		{"replica updates off, older name", func(v map[string]string) {
+			delete(v, "log_replica_updates")
+			v["log_slave_updates"] = "OFF"
+		}, `log_replica_updates must be ON, got "OFF"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,6 +74,17 @@ func TestCheckVariablesRejectsViolations(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err, tt.wantMsg)
 			}
 		})
+	}
+}
+
+// TestReplicaUpdatesAreReadUnderTheOlderName: MySQL before 8.0.26 has only log_slave_updates.
+func TestReplicaUpdatesAreReadUnderTheOlderName(t *testing.T) {
+	vars := goodVars()
+	delete(vars, "log_replica_updates")
+	vars["log_slave_updates"] = "ON"
+	vars["version"] = "8.0.23"
+	if err := checkVariables(vars); err != nil {
+		t.Fatalf("checkVariables() = %v", err)
 	}
 }
 
