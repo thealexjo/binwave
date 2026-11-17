@@ -13,7 +13,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/clickhouse v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.45.0
 	go.yaml.in/yaml/v3 v3.0.6
-	golang.org/x/text v0.43.0
+	golang.org/x/text v0.44.0
 )
 
 require (
