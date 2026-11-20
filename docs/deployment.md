@@ -209,7 +209,7 @@ Do not start it right away — check first (step 7).
 docker pull ghcr.io/thealexjo/binwave:0.1   # or build it from the source: make docker-build IMAGE=binwave:local
 ```
 
-The config is mounted as a file at `/etc/binwave/config.yaml`; secrets come through environment variables, which the config substitutes itself as `${ENV}`. A compose example is `deploy/docker/compose.example.yaml`. The image is distroless, non-root, without a shell — CLI commands (`replication status` and the like) run through `docker exec` with the same binary inside the container.
+The config is mounted as a file at `/etc/binwave/config.yaml`; secrets come through environment variables, which the config substitutes itself as `${ENV}`. A compose example is `deploy/docker/compose.example.yaml`. The image is Debian slim, non-root (uid 65532), with bash for its entrypoint `docker-entrypoint.sh`: before the start it sources every `*.sh` of `/docker-entrypoint.d` (mount them there or add them in a derived image), then `exec`s the command, `binwave run` by default; arguments that are not a command go to binwave, so `docker run <image> tables ...` works, and `bash`/`sh` start a shell without the scripts. `DOCKER_DEBUG=true` traces the entrypoint. CLI commands (`replication status` and the like) run through `docker exec` with the same binary inside the container.
 
 The state directory `/var/lib/binwave` must be writable by the user of the image (UID `65532`): a named volume gets the owner from the image, a directory mounted from the host needs `chown 65532:65532`.
 
