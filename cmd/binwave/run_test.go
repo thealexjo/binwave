@@ -678,6 +678,35 @@ func TestReplicationStatusShowsTheFailureAndHowToSkipIt(t *testing.T) {
 	}
 }
 
+// TestReplicationStatusOfATaggedTransactionOffersItsGTID: a tagged GTID (MySQL 8.4) is shown and
+// offered to --gtid-next whole, uuid:tag:sequence, and resume passes it on unchanged.
+func TestReplicationStatusOfATaggedTransactionOffersItsGTID(t *testing.T) {
+	const tagged = "6d4d8f60-1111-2222-3333-444455556666:batch:6"
+	cfg := writeConfig(t, controlConfig)
+	f := &fakeControl{status: observability.Status{
+		State: observability.StateFailed,
+		Failure: &failinfo.Failure{
+			Time: time.Now(), GTID: tagged, Kind: failinfo.KindRows,
+			Table: "shop.orders", Op: "insert", Rows: 1, Message: "the value cannot be converted",
+		},
+	}}
+	var stdout, stderr bytes.Buffer
+
+	if code := runWith(context.Background(), []string{"replication", "status", "--config", cfg}, &stdout, &stderr, controlDeps(f)); code != exitOK {
+		t.Fatalf("status: exit code = %d\n%s", code, stderr.String())
+	}
+	assertContains(t, "stdout", stdout.String(), "transaction:  "+tagged)
+	assertContains(t, "stdout", stdout.String(), "resume --gtid-next "+tagged+" ")
+
+	r := &fakeControl{}
+	if code := runWith(context.Background(), []string{"replication", "resume", "--config", cfg, "--gtid-next", tagged}, &stdout, &stderr, controlDeps(r)); code != exitOK {
+		t.Fatalf("resume: exit code = %d\n%s", code, stderr.String())
+	}
+	if want := "resume skip=0 gtid=" + tagged; len(r.calls) != 1 || r.calls[0] != want {
+		t.Errorf("calls %v, want [%s]", r.calls, want)
+	}
+}
+
 func TestReplicationStatusOfAFailureOfAWriteOffersNoSkip(t *testing.T) {
 	f := &fakeControl{status: observability.Status{
 		State:   observability.StateFailed,

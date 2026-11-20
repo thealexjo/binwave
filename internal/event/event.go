@@ -14,7 +14,7 @@ type Event interface{ isEvent() }
 
 // Begin opens a transaction.
 type Begin struct {
-	// GTID identifies the transaction as "source_uuid:sequence".
+	// GTID identifies the transaction as "source_uuid:sequence", or "source_uuid:tag:sequence" when tagged.
 	GTID string
 	// CommitTime is when the transaction was committed on the origin server.
 	CommitTime time.Time

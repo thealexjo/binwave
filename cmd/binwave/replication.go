@@ -31,9 +31,10 @@ const replicationUsage = `Usage: binwave replication <pause|resume|status|snapsh
   resume    Start replication again from the saved position. After a failure it tries the failed
             transaction once more; --skip-transactions N drops the next N transactions, starting
             with the failed one (like MySQL's sql_replica_skip_counter), and --gtid-next UUID:N
-            drops the transaction with that GTID (like the empty transaction injected with
-            SET GTID_NEXT). A skipped transaction is NOT applied to ClickHouse. Skipping is
-            possible only while replication is stopped by a failure or a pause.
+            (UUID:TAG:N for a tagged GTID) drops the transaction with that GTID (like the empty
+            transaction injected with SET GTID_NEXT). A skipped transaction is NOT applied to
+            ClickHouse. Skipping is possible only while replication is stopped by a failure or a
+            pause.
   status    Show the state of the running service. After a failure it shows which transaction
             failed, what it was doing (statement, or table, operation and the key of the row,
             with its values: they can be personal data) and why.
@@ -87,7 +88,7 @@ func runReplication(ctx context.Context, args []string, stdout, stderr io.Writer
 	var req control.ResumeRequest
 	if sub == "resume" {
 		fs.IntVar(&req.SkipTransactions, "skip-transactions", 0, "skip this many transactions, starting with the failed one")
-		fs.StringVar(&req.GTIDNext, "gtid-next", "", "skip the transaction with this GTID (uuid:sequence)")
+		fs.StringVar(&req.GTIDNext, "gtid-next", "", "skip the transaction with this GTID (uuid:sequence or uuid:tag:sequence)")
 	}
 	positional, err := parseFlags(fs, args[1:])
 	if err != nil {

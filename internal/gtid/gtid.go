@@ -19,7 +19,7 @@ func Parse(text string) (*Set, error) {
 	return &Set{set: set}, nil
 }
 
-// Contains reports whether the transaction (a single GTID, "uuid:sequence") is in the set.
+// Contains reports whether the transaction (a single GTID, "uuid:sequence" or "uuid:tag:sequence") is in the set.
 func (s *Set) Contains(gtid string) (bool, error) {
 	one, err := gomysql.ParseMysqlGTIDSet(gtid)
 	if err != nil {

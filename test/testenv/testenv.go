@@ -90,6 +90,27 @@ func (m *MySQL) Restart(t *testing.T) {
 	}
 }
 
+// writer is the account of Writer, an application next to binwave.
+const writer = "binwave_writer"
+
+// Writer connects to the test database as an application that holds the given global privileges
+// on top of writing to it (TRANSACTION_GTID_TAG and SESSION_VARIABLES_ADMIN, to write tagged GTIDs),
+// which binwave's user does not: User keeps exactly the rights of a production binwave user. The
+// pool wipe drops the account.
+func (m *MySQL) Writer(t *testing.T, privileges string) *sql.DB {
+	t.Helper()
+	for _, stmt := range []string{
+		"CREATE USER '" + writer + "'@'%' IDENTIFIED BY '" + password + "'",
+		"GRANT ALL ON `" + database + "`.* TO '" + writer + "'@'%'",
+		"GRANT " + privileges + " ON *.* TO '" + writer + "'@'%'",
+	} {
+		if _, err := m.srv.root.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	return openDB(t, "mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true", writer, password, m.Host, m.Port, database))
+}
+
 func mysqlDSN(host string, port int) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true", user, password, host, port, database)
 }
