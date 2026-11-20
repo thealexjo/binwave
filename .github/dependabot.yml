@@ -5,6 +5,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # A pseudo-version of the TiDB repository, which has no releases of the parser: updated by hand.
+      - dependency-name: github.com/pingcap/tidb/pkg/parser
     groups:
       go:
         update-types: [minor, patch]
