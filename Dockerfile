@@ -15,11 +15,9 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     GOOS=${TARGETOS} GOARCH=${TARGETARCH} make build VERSION=${VERSION} COMMIT=${COMMIT} DATE=${DATE}
-# The directory of the default control socket, empty; the final image has no shell to make it.
-RUN mkdir -p /out/run/binwave
 
-# Static binary, no shell, non-root (uid 65532), CA certificates included.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
+# Static binary with bash for docker-entrypoint.sh, non-root (uid 65532), CA certificates included.
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 ARG VERSION=dev
 ARG COMMIT=unknown
@@ -32,10 +30,20 @@ LABEL org.opencontainers.image.title="binwave" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${DATE}"
 
+# The CA bundle of the build image: TLS to MySQL and ClickHouse without apt in this one.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+# The same user as distroless nonroot, so that existing volumes keep their owner. /run/binwave holds
+# the default control socket, as with RuntimeDirectory= of the unit; /docker-entrypoint.d holds the
+# *.sh scripts docker-entrypoint.sh sources before the start (empty here, mounted or added in a derived image).
+RUN groupadd --gid 65532 nonroot \
+    && useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin nonroot \
+    && install -d -o 65532 -g 65532 /run/binwave /var/lib/binwave \
+    && install -d /docker-entrypoint.d
 COPY --from=build /src/bin/binwave /usr/local/bin/binwave
-# The default control socket /run/binwave/binwave.sock, as with RuntimeDirectory= of the unit; a
-# volume, so that it is writable in a read-only container.
-COPY --from=build --chown=65532:65532 /out/run/binwave /run/binwave
+COPY --chmod=0755 deploy/docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+USER 65532:65532
+
+# A volume, so that the socket is writable in a read-only container.
 VOLUME ["/run/binwave"]
 
 # Same contract as the systemd unit: state lives in $STATE_DIRECTORY (file checkpoint store only).
@@ -49,6 +57,7 @@ EXPOSE 9187
 # SIGTERM (docker stop) triggers graceful shutdown; allow enough time: docker stop -t 120.
 STOPSIGNAL SIGTERM
 
-ENTRYPOINT ["/usr/local/bin/binwave"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # No --config: binwave defaults to /etc/binwave/config.yaml, which deploy/docker/compose.example.yaml mounts there.
-CMD ["run"]
+# Arguments that are not a command go to binwave: `docker run <image> tables ...` still works.
+CMD ["binwave", "run"]
