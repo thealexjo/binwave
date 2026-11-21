@@ -13,9 +13,6 @@ import (
 // rebuildSuffix names the table a rebuild fills before it takes the place of the original.
 const rebuildSuffix = "__rebuild"
 
-// RebuildMarker is the comment of the table a rebuild fills; it travels with the table in the swap.
-const RebuildMarker = "binwave: rebuild"
-
 // RebuildName is the name of the table a rebuild of table fills.
 func RebuildName(table string) string { return table + rebuildSuffix }
 
@@ -125,7 +122,7 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 	// old table, under the other name, is still to be dropped.
 	if c.rebuilt(defs, current, req) {
 		comment, _, err := c.tableComment(ctx, req.Database, req.Table)
-		if err != nil || comment != RebuildMarker {
+		if err != nil || !isMarker(comment, RebuildMarker(req.Table)) {
 			return err
 		}
 		return c.dropLeftover(ctx, req, table, tmp)
@@ -215,7 +212,7 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 	}
 
 	createStmt := "CREATE TABLE " + tmp + " (" + strings.Join(created, ", ") + ") ENGINE = ReplacingMergeTree(" +
-		quote(ColVersion) + ", " + quote(ColIsDeleted) + ") ORDER BY (" + strings.Join(quotedKey, ", ") + ") COMMENT '" + RebuildMarker + "'"
+		quote(ColVersion) + ", " + quote(ColIsDeleted) + ") ORDER BY (" + strings.Join(quotedKey, ", ") + ") COMMENT " + stringLiteral(RebuildMarker(req.Table))
 	copyStmt := "INSERT INTO " + tmp + " (" + strings.Join(insert, ", ") + ") SELECT " + strings.Join(selects, ", ") +
 		" FROM " + table + " FINAL WHERE " + quote(ColIsDeleted) + " = 0"
 	exchangeStmt := "EXCHANGE TABLES " + table + " AND " + tmp
@@ -240,7 +237,7 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 		if err != nil {
 			return err
 		}
-		if comment != RebuildMarker {
+		if !isMarker(comment, RebuildMarker(req.Table)) {
 			return &ConflictError{Err: fmt.Errorf("ClickHouse has the table %s, which is not a copy made by a rebuild of %s; "+
 				"binwave does not drop or reuse it: rename or drop it in ClickHouse and resume", tmp, table)}
 		}

@@ -576,8 +576,7 @@ func (p *Pipeline) shadowTable(def *schema.Table, shadow string) (*chsink.Table,
 	if err != nil {
 		return nil, fmt.Errorf("resync %s: %w", def.FullName(), err)
 	}
-	t.Name = shadow
-	t.Comment = chsink.ResyncMarker
+	t.Name, t.Comment = shadow, chsink.ResyncMarker(t.Name)
 	return t, nil
 }
 

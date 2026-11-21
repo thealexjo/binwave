@@ -88,40 +88,79 @@ func TestEnsureNeverTouchesAnExistingTable(t *testing.T) {
 
 // TestEnsureNeverTakesATableBinwaveKeepsForAnotherJob: a copy a failed rebuild left, or the shadow
 // table of a resync, has the shape of a source table of its name, but it is binwave's for that job:
-// a source table created later under that name is refused, and the copy keeps its rows.
+// a source table created later under that name is refused, and the copy keeps its rows. The marker of
+// a job for the table itself is the swap of its job, interrupted, and the table is taken, whatever its
+// name ends with. The marker of an earlier release names no table, and the name of the table tells.
 func TestEnsureNeverTakesATableBinwaveKeepsForAnotherJob(t *testing.T) {
 	t.Parallel()
 	ch := testenv.StartClickHouse(t)
 	sink := openSink(t, ch)
 	ctx := context.Background()
-	for _, marker := range []string{chsink.RebuildMarker, chsink.ResyncMarker} {
-		copied := resolveTable(t, kvTable(), nil)
-		copied.Name = "kv__copy"
-		if err := sink.Ensure(ctx, copied, additive); err != nil {
+	for _, job := range []struct {
+		suffix         string
+		marker         func(string) string
+		earlierRelease string
+	}{
+		{"__rebuild", chsink.RebuildMarker, "binwave: rebuild"},
+		{"__resync", chsink.ResyncMarker, "binwave: resync shadow"},
+	} {
+		name := "kv" + job.suffix
+		for _, marker := range []string{job.marker("kv"), job.earlierRelease} {
+			copied := resolveTable(t, kvTable(), nil)
+			copied.Name = name
+			if err := sink.Ensure(ctx, copied, additive); err != nil {
+				t.Fatal(err)
+			}
+			insertKV(t, sink, copied, kvRows(event.Insert, nil, []any{int32(1), "copied"}), 10)
+			execCH(t, ch, "ALTER TABLE replica."+name+" MODIFY COMMENT '"+marker+"'")
+
+			src := kvTable()
+			src.Name = name
+			err := sink.Ensure(ctx, resolveTable(t, src, nil), additive)
+			if !chsink.IsTableProblem(err) || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s on %s: Ensure() = %v, want a table problem that names the table", marker, name, err)
+			}
+			if rows := readTable(t, ch, name, "k"); len(rows) != 1 || rows[0]["v"] != "copied" {
+				t.Errorf("%s on %s: the copy changed: %v", marker, name, rows)
+			}
+			execCH(t, ch, "DROP TABLE replica."+name)
+
+			own := resolveTable(t, kvTable(), nil)
+			if err := sink.Ensure(ctx, own, additive); err != nil {
+				t.Fatal(err)
+			}
+			execCH(t, ch, "ALTER TABLE replica.kv MODIFY COMMENT '"+marker+"'")
+			if err := sink.Ensure(ctx, own, additive); err != nil {
+				t.Errorf("%s: Ensure() of kv after the swap of its own job = %v, want it taken", marker, err)
+			}
+			execCH(t, ch, "DROP TABLE replica.kv")
+		}
+
+		// A replicated table whose name ends like a copy, after the swap of its own job.
+		src := kvTable()
+		src.Name = name
+		live := resolveTable(t, src, nil)
+		if err := sink.Ensure(ctx, live, additive); err != nil {
 			t.Fatal(err)
 		}
-		insertKV(t, sink, copied, kvRows(event.Insert, nil, []any{int32(1), "copied"}), 10)
-		execCH(t, ch, "ALTER TABLE replica.kv__copy MODIFY COMMENT '"+marker+"'")
-
-		src := kvTable()
-		src.Name = "kv__copy"
-		err := sink.Ensure(ctx, resolveTable(t, src, nil), additive)
-		if !chsink.IsTableProblem(err) || !strings.Contains(err.Error(), "kv__copy") {
-			t.Errorf("%s: Ensure() = %v, want a table problem that names the table", marker, err)
+		execCH(t, ch, "ALTER TABLE replica."+name+" MODIFY COMMENT '"+job.marker(name)+"'")
+		if err := sink.Ensure(ctx, live, additive); err != nil {
+			t.Errorf("Ensure() of %s after the swap of its own job = %v, want it taken", name, err)
 		}
-		if rows := readTable(t, ch, "kv__copy", "k"); len(rows) != 1 || rows[0]["v"] != "copied" {
-			t.Errorf("%s: the copy changed: %v", marker, rows)
-		}
-		execCH(t, ch, "DROP TABLE replica.kv__copy")
+		execCH(t, ch, "DROP TABLE replica."+name)
 	}
 
 	// The shadow table of a resync is prepared again after a restart, with its own marker.
 	shadow := resolveTable(t, kvTable(), nil)
-	shadow.Name, shadow.Comment = "kv__resync", chsink.ResyncMarker
+	shadow.Name, shadow.Comment = "kv__resync", chsink.ResyncMarker("kv")
 	for i := range 2 {
 		if err := sink.Ensure(ctx, shadow, additive); err != nil {
 			t.Fatalf("Ensure() of the shadow table, call %d: %v", i+1, err)
 		}
+	}
+	execCH(t, ch, "ALTER TABLE replica.kv__resync MODIFY COMMENT 'binwave: resync shadow'")
+	if err := sink.Ensure(ctx, shadow, additive); err != nil {
+		t.Errorf("Ensure() of the shadow table an earlier release made: %v", err)
 	}
 }
 

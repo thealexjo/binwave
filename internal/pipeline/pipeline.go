@@ -659,7 +659,7 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 	job, resyncing := p.resyncs[name]
 	if resyncing {
 		// The table is being resynchronized: its changes go to the shadow table, which replaces it.
-		t.Name, t.Comment = job.state.Shadow, chsink.ResyncMarker
+		t.Name, t.Comment = job.state.Shadow, chsink.ResyncMarker(t.Name)
 	}
 	// The target is one database, so tables of the same name in different source databases would
 	// share a ClickHouse table and overwrite each other's rows without any error.

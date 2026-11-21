@@ -150,89 +150,101 @@ func TestResyncRefusesWhatItCannotDo(t *testing.T) {
 }
 
 // TestSwapShadowIsRepeatableAtEveryStep: the swap is one EXCHANGE and two cleanups, and a crash may end it
-// anywhere. Repeating it from any of the states finishes the work, and a table that has no shadow table
-// and is not marked is left alone.
+// anywhere. Repeating it from any of the states finishes the work, also for a table whose own name ends
+// like a shadow table and for a shadow table an earlier release marked, and a table that has no shadow
+// table and is not marked is left alone.
 func TestSwapShadowIsRepeatableAtEveryStep(t *testing.T) {
 	t.Parallel()
 	ch := testenv.StartClickHouse(t)
 	sink := openSink(t, ch)
 	ctx := context.Background()
-	req := chsink.SwapRequest{Source: "shop.t", Database: "swapdb", Table: "t", Shadow: "t__resync"}
 	execCH(t, ch, "CREATE DATABASE IF NOT EXISTS swapdb")
 
-	names := func() string {
-		rows, err := ch.DB.Query("SELECT name || ':' || comment FROM system.tables WHERE database = 'swapdb' ORDER BY name")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = rows.Close() }()
-		var out []string
-		for rows.Next() {
-			var s string
-			if err := rows.Scan(&s); err != nil {
+	for _, c := range []struct{ table, marker string }{
+		{"t", chsink.ResyncMarker("t")},
+		{"t__resync", chsink.ResyncMarker("t__resync")},
+		{"t", "binwave: resync shadow"},
+	} {
+		shadow := c.table + "__resync"
+		req := chsink.SwapRequest{Source: "shop." + c.table, Database: "swapdb", Table: c.table, Shadow: shadow}
+		table, shadowTable := "swapdb.`"+c.table+"`", "swapdb.`"+shadow+"`"
+		done := c.table + ":"
+
+		names := func() string {
+			rows, err := ch.DB.Query("SELECT name || ':' || comment FROM system.tables WHERE database = 'swapdb' ORDER BY name")
+			if err != nil {
 				t.Fatal(err)
 			}
-			out = append(out, s)
+			defer func() { _ = rows.Close() }()
+			var out []string
+			for rows.Next() {
+				var s string
+				if err := rows.Scan(&s); err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, s)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			return strings.Join(out, ",")
 		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
+		setup := func() {
+			execCH(t, ch, "DROP TABLE IF EXISTS "+table, "DROP TABLE IF EXISTS "+shadowTable,
+				"CREATE TABLE "+table+" (v String) ENGINE = MergeTree ORDER BY v",
+				"CREATE TABLE "+shadowTable+" (v String) ENGINE = MergeTree ORDER BY v COMMENT '"+c.marker+"'",
+				"INSERT INTO "+table+" VALUES ('old')", "INSERT INTO "+shadowTable+" VALUES ('new')")
 		}
-		return strings.Join(out, ",")
-	}
-	setup := func() {
-		execCH(t, ch, "DROP TABLE IF EXISTS swapdb.t", "DROP TABLE IF EXISTS swapdb.t__resync",
-			"CREATE TABLE swapdb.t (v String) ENGINE = MergeTree ORDER BY v",
-			"CREATE TABLE swapdb.t__resync (v String) ENGINE = MergeTree ORDER BY v COMMENT '"+chsink.ResyncMarker+"'",
-			"INSERT INTO swapdb.t VALUES ('old')", "INSERT INTO swapdb.t__resync VALUES ('new')")
-	}
-	value := func() string {
-		var v string
-		if err := ch.DB.QueryRow("SELECT v FROM swapdb.t").Scan(&v); err != nil {
-			t.Fatal(err)
+		value := func() string {
+			var v string
+			if err := ch.DB.QueryRow("SELECT v FROM " + table).Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			return v
 		}
-		return v
-	}
 
-	setup()
-	if err := sink.SwapShadow(ctx, req); err != nil {
-		t.Fatalf("SwapShadow() = %v", err)
-	}
-	if got, want := names(), "t:"; got != want || value() != "new" {
-		t.Errorf("after the swap: tables %q value %q, want %q and new", got, value(), want)
-	}
-	// Repeated after the whole thing was done and only the position was lost.
-	if err := sink.SwapShadow(ctx, req); err != nil || value() != "new" {
-		t.Errorf("repeated swap = %v, value %q: it must change nothing", err, value())
-	}
+		setup()
+		if err := sink.SwapShadow(ctx, req); err != nil {
+			t.Fatalf("%s: SwapShadow() = %v", c.marker, err)
+		}
+		if got := names(); got != done || value() != "new" {
+			t.Errorf("%s: after the swap: tables %q value %q, want %q and new", c.marker, got, value(), done)
+		}
+		// Repeated after the whole thing was done and only the position was lost.
+		if err := sink.SwapShadow(ctx, req); err != nil || value() != "new" {
+			t.Errorf("%s: repeated swap = %v, value %q: it must change nothing", c.marker, err, value())
+		}
 
-	// A crash right after the EXCHANGE: the table has the marker, the shadow name holds the old table.
-	setup()
-	execCH(t, ch, "EXCHANGE TABLES swapdb.t AND swapdb.t__resync")
-	if err := sink.SwapShadow(ctx, req); err != nil {
-		t.Fatalf("SwapShadow() after the exchange = %v", err)
-	}
-	if got := names(); got != "t:" || value() != "new" {
-		t.Errorf("after finishing an exchange: tables %q value %q", got, value())
-	}
+		// A crash right after the EXCHANGE: the table has the marker, the shadow name holds the old table.
+		setup()
+		execCH(t, ch, "EXCHANGE TABLES "+table+" AND "+shadowTable)
+		if err := sink.SwapShadow(ctx, req); err != nil {
+			t.Fatalf("%s: SwapShadow() after the exchange = %v", c.marker, err)
+		}
+		if got := names(); got != done || value() != "new" {
+			t.Errorf("%s: after finishing an exchange: tables %q value %q", c.marker, got, value())
+		}
 
-	// A crash after the old table was dropped, before the marker was removed.
-	setup()
-	execCH(t, ch, "EXCHANGE TABLES swapdb.t AND swapdb.t__resync", "DROP TABLE swapdb.t__resync")
-	if err := sink.SwapShadow(ctx, req); err != nil {
-		t.Fatalf("SwapShadow() before the marker was removed = %v", err)
-	}
-	if got := names(); got != "t:" || value() != "new" {
-		t.Errorf("after removing the marker: tables %q value %q", got, value())
-	}
+		// A crash after the old table was dropped, before the marker was removed.
+		setup()
+		execCH(t, ch, "EXCHANGE TABLES "+table+" AND "+shadowTable, "DROP TABLE "+shadowTable)
+		if err := sink.SwapShadow(ctx, req); err != nil {
+			t.Fatalf("%s: SwapShadow() before the marker was removed = %v", c.marker, err)
+		}
+		if got := names(); got != done || value() != "new" {
+			t.Errorf("%s: after removing the marker: tables %q value %q", c.marker, got, value())
+		}
 
-	// A shadow table that is not the one binwave made is not put in the place of anything.
-	setup()
-	execCH(t, ch, "ALTER TABLE swapdb.t__resync MODIFY COMMENT 'made by hand'")
-	err := sink.SwapShadow(ctx, req)
-	if !chsink.IsConflict(err) {
-		t.Errorf("a shadow table without the marker: %v, want a conflict", err)
-	}
-	if value() != "old" {
-		t.Errorf("a table was replaced by a shadow table binwave did not make")
+		// A shadow table that is not the one binwave made is not put in the place of anything.
+		setup()
+		execCH(t, ch, "ALTER TABLE "+shadowTable+" MODIFY COMMENT 'made by hand'")
+		err := sink.SwapShadow(ctx, req)
+		if !chsink.IsConflict(err) {
+			t.Errorf("%s: a shadow table without the marker: %v, want a conflict", c.marker, err)
+		}
+		if value() != "old" {
+			t.Errorf("%s: a table was replaced by a shadow table binwave did not make", c.marker)
+		}
+		execCH(t, ch, "DROP TABLE IF EXISTS "+table, "DROP TABLE IF EXISTS "+shadowTable)
 	}
 }

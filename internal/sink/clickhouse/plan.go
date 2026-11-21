@@ -112,10 +112,13 @@ func TargetName(cfg *config.Config, database, table string) (targetDB, targetTab
 	return targetDB, targetTable
 }
 
+// resyncSuffix names the shadow table of a resync.
+const resyncSuffix = "__resync"
+
 // ShadowName is the name of the shadow table of a resync of database.table, next to its target table.
 func ShadowName(cfg *config.Config, database, table string) string {
 	_, target := TargetName(cfg, database, table)
-	return target + "__resync"
+	return target + resyncSuffix
 }
 
 // nameSet checks that every name is a column of src and returns them as a set.
@@ -231,7 +234,7 @@ func (t *Table) CreateStatement() string {
 	}
 	fmt.Fprintf(&b, "ORDER BY (%s)", strings.Join(quoted, ", "))
 	if t.Comment != "" {
-		fmt.Fprintf(&b, "\nCOMMENT '%s'", strings.ReplaceAll(t.Comment, "'", "''"))
+		fmt.Fprintf(&b, "\nCOMMENT %s", stringLiteral(t.Comment))
 	}
 	return b.String()
 }

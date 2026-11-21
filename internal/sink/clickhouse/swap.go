@@ -5,11 +5,6 @@ import (
 	"fmt"
 )
 
-// ResyncMarker is the comment of the shadow table of a resync. EXCHANGE TABLES moves the comment with
-// the table, so which of two tables is the new one is told by the comment, and a swap that a crash
-// interrupted can be finished without guessing.
-const ResyncMarker = "binwave: resync shadow"
-
 // SwapRequest is the replacement of a table by its shadow table, already decided.
 type SwapRequest struct {
 	Source   string
@@ -62,10 +57,13 @@ func (c *Client) SwapShadow(ctx context.Context, req SwapRequest) error {
 		return err
 	}
 
+	// EXCHANGE TABLES moves the marker with the table, so which of two tables is the new one is told by
+	// the marker, and a swap that a crash interrupted is finished without guessing.
+	marker := ResyncMarker(req.Table)
 	switch {
-	case tExists && tComment == ResyncMarker:
+	case tExists && isMarker(tComment, marker):
 		// The swap was made; clean up.
-	case sExists && sComment == ResyncMarker && tExists:
+	case sExists && isMarker(sComment, marker) && tExists:
 		if req.DryRun {
 			c.log.Info("dry run: statement not executed", "statement", "EXCHANGE TABLES "+table+" AND "+shadow)
 			return nil
@@ -73,7 +71,7 @@ func (c *Client) SwapShadow(ctx context.Context, req SwapRequest) error {
 		if err := c.exec(ctx, "EXCHANGE TABLES "+table+" AND "+shadow); err != nil {
 			return c.classifyResync(req, err)
 		}
-	case sExists && sComment == ResyncMarker:
+	case sExists && isMarker(sComment, marker):
 		if req.DryRun {
 			c.log.Info("dry run: statement not executed", "statement", "RENAME TABLE "+shadow+" TO "+table)
 			return nil

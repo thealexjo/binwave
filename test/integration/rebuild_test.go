@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/thealexjo/binwave/internal/config"
+	"github.com/thealexjo/binwave/internal/event"
+	"github.com/thealexjo/binwave/internal/schema"
 	chsink "github.com/thealexjo/binwave/internal/sink/clickhouse"
+	"github.com/thealexjo/binwave/internal/typemap"
 	"github.com/thealexjo/binwave/test/migrationsim"
 	"github.com/thealexjo/binwave/test/testenv"
 )
@@ -242,7 +245,7 @@ func TestRebuildCanBeRepeatedAtEveryStep(t *testing.T) {
 
 	// A leftover copy with the right key and a partial fill, as a crash in the middle of the copy leaves it.
 	binwaveShaped(t, ch, "t__rebuild", "code", "(2, 'b', 1, 0, now())")
-	markRebuild(t, ch, "t__rebuild")
+	markRebuild(t, ch, "t__rebuild", chsink.RebuildMarker("t"))
 
 	if err := client.Rebuild(ctx, req); err != nil {
 		t.Fatal(err)
@@ -268,7 +271,7 @@ func TestRebuildCanBeRepeatedAtEveryStep(t *testing.T) {
 	}
 	// And with the swap done but the old table not yet dropped: the copy, now t, has the marker.
 	binwaveShaped(t, ch, "t__rebuild", "id", "(9, 'old', 1, 0, now())")
-	markRebuild(t, ch, "t")
+	markRebuild(t, ch, "t", chsink.RebuildMarker("t"))
 	if err := client.Rebuild(ctx, req); err != nil {
 		t.Fatalf("the rebuild after a swap that was not cleaned up: %v", err)
 	}
@@ -280,10 +283,81 @@ func TestRebuildCanBeRepeatedAtEveryStep(t *testing.T) {
 	}
 }
 
-// markRebuild gives a table the marker of the copy a rebuild makes.
-func markRebuild(t *testing.T, ch *testenv.ClickHouse, table string) {
+// TestARestartAfterTheSwapOfARebuildFinishesIt: a crash after EXCHANGE TABLES leaves the rebuilt
+// table in its place with the marker of the copy, and the statement is replayed after the restart. The
+// restart binds the table to the source as it is now before the replay reaches the statement, and it
+// must take the table back, for the replay to finish the rebuild: also a table whose own name ends like
+// a copy, and a table an earlier release marked.
+func TestARestartAfterTheSwapOfARebuildFinishesIt(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	client := openSink(t, ch)
+	ctx := context.Background()
+
+	for _, crash := range []struct {
+		name     string
+		table    string
+		marker   string
+		leftover bool // the old table, under the name of the copy, is not dropped yet
+	}{
+		{"after the exchange", "kv", chsink.RebuildMarker("kv"), true},
+		{"after the old table was dropped", "kv", chsink.RebuildMarker("kv"), false},
+		{"after the exchange of a table named like a copy", "kv__rebuild", chsink.RebuildMarker("kv__rebuild"), true},
+		{"after the old table of a table named like a copy was dropped", "kv__rebuild", chsink.RebuildMarker("kv__rebuild"), false},
+		{"after the exchange of an earlier release", "kv", "binwave: rebuild", true},
+	} {
+		src := func(key ...int) *schema.Table {
+			return &schema.Table{
+				Database: "shop", Name: crash.table,
+				Columns: []typemap.Column{
+					{Name: "k", Kind: typemap.KindInt},
+					{Name: "code", Kind: typemap.KindVarChar, Length: 20, Charset: "utf8mb4"},
+				},
+				PrimaryKey: key,
+			}
+		}
+		req := chsink.RebuildRequest{Source: "shop." + crash.table, Database: "replica", Table: crash.table, Key: []string{"k", "code"}}
+		copied := chsink.RebuildName(crash.table)
+
+		before := resolveTable(t, src(0), nil)
+		if err := client.Ensure(ctx, before, additive); err != nil {
+			t.Fatal(err)
+		}
+		insertKV(t, client, before, event.Rows{Table: src(0), Op: event.Insert, Rows: []event.Row{
+			{After: []any{int32(1), "a"}}, {After: []any{int32(2), "b"}},
+		}}, 10)
+		if err := client.Rebuild(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+		// What the crash left of the rebuild.
+		markRebuild(t, ch, crash.table, crash.marker)
+		if crash.leftover {
+			binwaveShaped(t, ch, copied, "id", "(9, 'old', 1, 0, now())")
+		}
+
+		if err := client.Ensure(ctx, resolveTable(t, src(0, 1), nil), additive); err != nil {
+			t.Fatalf("%s: the restart binds the rebuilt table: %v", crash.name, err)
+		}
+		if err := client.Rebuild(ctx, req); err != nil {
+			t.Fatalf("%s: the replayed rebuild: %v", crash.name, err)
+		}
+		if got := chTables(t, ch); strings.Join(got, ",") != crash.table {
+			t.Errorf("%s: tables %v, want only %s", crash.name, got, crash.table)
+		}
+		if got := chTableComment(t, ch, crash.table); got != "" {
+			t.Errorf("%s: the comment of %s = %q, want the marker removed", crash.name, crash.table, got)
+		}
+		if got, err := textRows(ch.DB, "SELECT k, code FROM replica."+crash.table+" FINAL ORDER BY k"); err != nil || strings.Join(got, ";") != "1\ta;2\tb" {
+			t.Errorf("%s: rows %v (%v)", crash.name, got, err)
+		}
+		execCH(t, ch, "DROP TABLE replica."+crash.table)
+	}
+}
+
+// markRebuild gives a table a comment, the marker of the copy a rebuild makes.
+func markRebuild(t *testing.T, ch *testenv.ClickHouse, table, marker string) {
 	t.Helper()
-	if _, err := ch.DB.Exec("ALTER TABLE replica." + table + " MODIFY COMMENT '" + chsink.RebuildMarker + "'"); err != nil {
+	if _, err := ch.DB.Exec("ALTER TABLE replica." + table + " MODIFY COMMENT '" + marker + "'"); err != nil {
 		t.Fatal(err)
 	}
 }

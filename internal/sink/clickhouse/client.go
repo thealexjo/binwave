@@ -207,15 +207,19 @@ func (c *Client) recordTypes(ctx context.Context, t *Table) error {
 	return nil
 }
 
-// notAnotherJobs refuses an existing table that has the marker of a table binwave keeps for a job (the
-// copy of a rebuild, the shadow table of a resync) when it is not prepared for that job: its shape is
-// the shape of a source table of its name, and rows written to it would mix with the copy.
+// notAnotherJobs refuses an existing table that has the marker of a job for another table (the copy of
+// a rebuild, the shadow table of a resync) when it is not prepared for that job: its shape is the shape
+// of a source table of its name, and rows written to it would mix with the copy.
+//
+// The marker of a job for the table itself was carried to it by the swap that ended the job, which a
+// crash interrupted before it removed the marker: the table is the one it replaced, and the replayed
+// job finishes the swap.
 func (c *Client) notAnotherJobs(ctx context.Context, t *Table) error {
 	comment, _, err := c.tableComment(ctx, t.Database, t.Name)
 	if err != nil {
 		return err
 	}
-	if (comment == RebuildMarker || comment == ResyncMarker) && comment != t.Comment {
+	if of, marked := markedFor(comment, t.Name); marked && of != t.Name && !isMarker(comment, t.Comment) {
 		return &TableError{Table: t.Source.FullName(), Err: fmt.Errorf(
 			"clickhouse table %s has the comment %q: it is a table binwave keeps for another job, and %s is not written to it; "+
 				"drop it in ClickHouse if that job is over, or give the table another name with tables.overrides.<database.table>.target_table",
