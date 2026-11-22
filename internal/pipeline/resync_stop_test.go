@@ -18,16 +18,17 @@ func heartbeatsFor(n int) func() bool {
 	return func() bool { n--; return n < 0 }
 }
 
-// resyncFailure checks that Run stopped replication on the resync of table.
-func resyncFailure(t *testing.T, err error, table string, code errcode.Code) {
+// resyncFailure checks that Run stopped replication on the resync of table, with the code every resync
+// that cannot go on is held with.
+func resyncFailure(t *testing.T, err error, table string) {
 	t.Helper()
 	var failed *FailedError
 	if !errors.As(err, &failed) {
 		t.Fatalf("Run() = %v, want replication failed on the resync of %s", err, table)
 	}
 	f := failed.Failure
-	if f.Kind != failure.KindResync || f.Table != table || f.Code != string(code) || f.Skippable() {
-		t.Errorf("failure = %+v, want a resync failure of %s with %s that cannot be skipped", f, table, code)
+	if f.Kind != failure.KindResync || f.Table != table || f.Code != string(errcode.SYNC101) || f.Skippable() {
+		t.Errorf("failure = %+v, want a resync failure of %s with %s that cannot be skipped", f, table, errcode.SYNC101)
 	}
 }
 
@@ -67,7 +68,7 @@ func TestWithStopAFailedReadStopsReplicationAndKeepsTheResync(t *testing.T) {
 	}
 	h.source.until = heartbeatsFor(100000)
 
-	resyncFailure(t, h.runPipeline(t, p), "shop.items", errcode.SYNC101)
+	resyncFailure(t, h.runPipeline(t, p), "shop.items")
 
 	if got := quarantinedNames(h.store.current()); len(got) != 0 {
 		t.Errorf("quarantined = %v, want none with stop", got)
@@ -94,7 +95,7 @@ func TestWithStopADamagedWatermarkStopsReplication(t *testing.T) {
 	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
 	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
 
-	resyncFailure(t, h.run(t), "shop.items", errcode.SYNC101)
+	resyncFailure(t, h.run(t), "shop.items")
 
 	if n := h.sink.swapped(); n != 0 || len(h.sink.drops) != 0 {
 		t.Errorf("swaps = %d, drops = %v, want neither", n, h.sink.drops)
@@ -133,7 +134,7 @@ func TestWithStopAResyncThatCannotBeginAgainIsKeptAndBegunOnResume(t *testing.T)
 	}
 	h.source.until = heartbeatsFor(100000)
 
-	resyncFailure(t, h.runPipeline(t, p), "shop.items", errcode.SYNC101)
+	resyncFailure(t, h.runPipeline(t, p), "shop.items")
 	st, ok := savedResync(t, h)
 	if !ok || !st.Pending {
 		t.Fatalf("saved resync = %+v (found %v), want shop.items pending", st, ok)

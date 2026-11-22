@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thealexjo/binwave/internal/checkpoint"
 	"github.com/thealexjo/binwave/internal/control"
 	chsink "github.com/thealexjo/binwave/internal/sink/clickhouse"
 	"github.com/thealexjo/binwave/test/testenv"
@@ -203,22 +204,35 @@ func TestSwapShadowIsRepeatableAtEveryStep(t *testing.T) {
 			return v
 		}
 
-		setup()
-		if err := sink.SwapShadow(ctx, req); err != nil {
-			t.Fatalf("%s: SwapShadow() = %v", c.marker, err)
+		marks := func(table, shadow, shadowExists bool, when string) {
+			t.Helper()
+			want := chsink.SwapMarks{Table: table, Shadow: shadow, ShadowExists: shadowExists}
+			if got, err := sink.SwapMarks(ctx, req); err != nil || got != want {
+				t.Errorf("%s: SwapMarks() %s = %+v, %v, want %+v", c.marker, when, got, err, want)
+			}
 		}
+
+		setup()
+		marks(false, true, true, "before the swap")
+		if sent, err := sink.SwapShadow(ctx, req); err != nil || !sent {
+			t.Fatalf("%s: SwapShadow() = %v, %v, want the exchange sent", c.marker, sent, err)
+		}
+		marks(false, false, false, "after the swap")
 		if got := names(); got != done || value() != "new" {
 			t.Errorf("%s: after the swap: tables %q value %q, want %q and new", c.marker, got, value(), done)
 		}
-		// Repeated after the whole thing was done and only the position was lost.
-		if err := sink.SwapShadow(ctx, req); err != nil || value() != "new" {
+		// Repeated because the answer was lost: finished, it changes nothing.
+		repeat := req
+		repeat.Exchanged = true
+		if _, err := sink.SwapShadow(ctx, repeat); err != nil || value() != "new" {
 			t.Errorf("%s: repeated swap = %v, value %q: it must change nothing", c.marker, err, value())
 		}
 
 		// A crash right after the EXCHANGE: the table has the marker, the shadow name holds the old table.
 		setup()
 		execCH(t, ch, "EXCHANGE TABLES "+table+" AND "+shadowTable)
-		if err := sink.SwapShadow(ctx, req); err != nil {
+		marks(true, false, true, "after the exchange")
+		if _, err := sink.SwapShadow(ctx, req); err != nil {
 			t.Fatalf("%s: SwapShadow() after the exchange = %v", c.marker, err)
 		}
 		if got := names(); got != done || value() != "new" {
@@ -228,17 +242,42 @@ func TestSwapShadowIsRepeatableAtEveryStep(t *testing.T) {
 		// A crash after the old table was dropped, before the marker was removed.
 		setup()
 		execCH(t, ch, "EXCHANGE TABLES "+table+" AND "+shadowTable, "DROP TABLE "+shadowTable)
-		if err := sink.SwapShadow(ctx, req); err != nil {
+		marks(true, false, false, "after the old table was dropped")
+		if _, err := sink.SwapShadow(ctx, req); err != nil {
 			t.Fatalf("%s: SwapShadow() before the marker was removed = %v", c.marker, err)
 		}
 		if got := names(); got != done || value() != "new" {
 			t.Errorf("%s: after removing the marker: tables %q value %q", c.marker, got, value())
 		}
 
+		// An exchange sent before whose answer was lost, and that is not made yet (it may still be running
+		// on the server): it is not sent again, which could exchange the tables back.
+		setup()
+		repeat = req
+		repeat.Exchanged = true
+		if sent, err := sink.SwapShadow(ctx, repeat); !sent || err == nil {
+			t.Errorf("%s: a repeat of an exchange not made yet: %v, %v, want an error and the exchange counted as sent", c.marker, sent, err)
+		}
+		if value() != "old" {
+			t.Errorf("%s: a repeat of an exchange not made yet changed the table", c.marker)
+		}
+
+		// A shadow table lost before the swap: no swap was made, and nothing takes the table's place. Without
+		// Exchanged this is not taken for a swap finished before.
+		setup()
+		execCH(t, ch, "DROP TABLE "+shadowTable)
+		if sent, err := sink.SwapShadow(ctx, req); sent || !chsink.IsTableProblem(err) {
+			t.Errorf("%s: a lost shadow table: %v, %v, want an error of the table and nothing sent", c.marker, sent, err)
+		}
+		if value() != "old" {
+			t.Errorf("%s: a lost shadow table changed the table", c.marker)
+		}
+
 		// A shadow table that is not the one binwave made is not put in the place of anything.
 		setup()
 		execCH(t, ch, "ALTER TABLE "+shadowTable+" MODIFY COMMENT 'made by hand'")
-		err := sink.SwapShadow(ctx, req)
+		marks(false, false, true, "with a shadow table without the marker")
+		_, err := sink.SwapShadow(ctx, req)
 		if !chsink.IsConflict(err) {
 			t.Errorf("%s: a shadow table without the marker: %v, want a conflict", c.marker, err)
 		}
@@ -246,5 +285,101 @@ func TestSwapShadowIsRepeatableAtEveryStep(t *testing.T) {
 			t.Errorf("%s: a table was replaced by a shadow table binwave did not make", c.marker)
 		}
 		execCH(t, ch, "DROP TABLE IF EXISTS "+table, "DROP TABLE IF EXISTS "+shadowTable)
+	}
+}
+
+// TestARestartInTheMiddleOfTheSwapOfAResyncLosesNothing: the swap of a resync is EXCHANGE TABLES, the
+// drop of the old table and the removal of the marker, and the position without the resync is saved
+// only after them. A crash between them leaves the resync saved, and the transactions after the saved
+// position come again after the restart, before the swap is repeated: their rows must end up in the
+// table that stays.
+func TestARestartInTheMiddleOfTheSwapOfAResyncLosesNothing(t *testing.T) {
+	t.Parallel()
+	crashes := []struct {
+		name  string
+		steps []string
+	}{
+		{"after the exchange", []string{"EXCHANGE TABLES replica.acct AND replica.acct__resync"}},
+		{"after the old table was dropped", []string{"EXCHANGE TABLES replica.acct AND replica.acct__resync", "DROP TABLE replica.acct__resync"}},
+		{"after the marker was removed", []string{"EXCHANGE TABLES replica.acct AND replica.acct__resync", "DROP TABLE replica.acct__resync", "ALTER TABLE replica.acct MODIFY COMMENT ''"}},
+	}
+	// The entry as it was saved: read in full, or, by an earlier release that could make the exchange
+	// before a position said so, still reading at the start of its last partition, with the marker of that
+	// release. Where the shadow table is gone, the read begins again, with every partition.
+	saves := []struct {
+		name   string
+		done   bool
+		marker string
+	}{{"read in full", true, chsink.ResyncMarker("acct")}, {"still reading by an earlier release", false, "binwave: resync shadow"}}
+	for _, saved := range saves {
+		for _, crash := range crashes {
+			t.Run(saved.name+"/"+crash.name, func(t *testing.T) {
+				t.Parallel()
+				my := testenv.StartMySQL(t)
+				ch := testenv.StartClickHouse(t)
+				mustExec(t, my, "CREATE TABLE binwave.acct (id INT PRIMARY KEY, owner VARCHAR(20) NOT NULL, qty INT NOT NULL) "+
+					"PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (3), PARTITION p1 VALUES LESS THAN MAXVALUE)")
+				cfg := engineConfig(t, my, ch, "file")
+				w := my.Writer(t, "RELOAD")
+
+				e := startHubEngine(t, cfg)
+				mustExec(t, my, "INSERT INTO binwave.acct VALUES (1, 'a', 1), (2, 'b', 2), (3, 'c', 3)")
+				waitForConvergence(t, my, ch)
+				if err := e.stop(); err != nil {
+					t.Fatal(err)
+				}
+
+				// The resync was read to the end and the stream has passed its last watermark: the swap was
+				// begun. The copy holds what the source holds; the old table has a row it does not.
+				pos := loadPosition(t, ch, cfg)
+				entry := checkpoint.Resync{
+					Table: "binwave.acct", Shadow: "acct__resync", Version: pos.Version, Since: pos.GTIDSet,
+					Rows: 3, Done: true, Final: pos.GTIDSet, Started: time.Now(),
+				}
+				if !saved.done {
+					entry.Done, entry.Final, entry.Strategy, entry.Partition, entry.Rows = false, "", "partitioned", "p1", 2
+				}
+				pos.Resync = checkpoint.EncodeResyncs([]checkpoint.Resync{entry})
+				if err := checkpoint.NewFile(cfg.Checkpoint.FilePath).Save(context.Background(), pos); err != nil {
+					t.Fatal(err)
+				}
+				execCH(t, ch,
+					"CREATE TABLE replica.acct__resync AS replica.acct",
+					"INSERT INTO replica.acct__resync SELECT * FROM replica.acct",
+					"ALTER TABLE replica.acct__resync MODIFY COMMENT '"+saved.marker+"'",
+					"INSERT INTO replica.acct (id, owner, qty, _version, _is_deleted) VALUES (999999, 'ghost', 1, 1, 0)")
+				execCH(t, ch, crash.steps...)
+
+				// What the source wrote after the saved position, which comes again after the restart. It is in
+				// a binary log of its own, as after a rotation: the stream begins with it, with no transaction
+				// before it that the source skips and reports with a heartbeat.
+				if _, err := w.Exec("FLUSH BINARY LOGS"); err != nil {
+					t.Fatal(err)
+				}
+				mustExec(t, my, "INSERT INTO binwave.acct VALUES (4, 'd', 4)")
+				mustExec(t, my, "UPDATE binwave.acct SET qty = 10 WHERE id = 1")
+
+				e = startHubEngine(t, cfg)
+				waitUntil(t, "the resync to be finished", 60*time.Second, func() bool { return loadPosition(t, ch, cfg).Resync == "" })
+				want := mysqlAccounts(t, my)
+				var got map[int32]acct
+				deadline := time.Now().Add(30 * time.Second)
+				for time.Now().Before(deadline) {
+					if got, _ = clickhouseAccounts(t, ch); sameAccounts(got, want) {
+						break
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				if !sameAccounts(got, want) {
+					t.Errorf("ClickHouse holds %v, want what MySQL holds: %v", got, want)
+				}
+				if tables := chTables(t, ch); strings.Join(tables, ",") != "acct" {
+					t.Errorf("tables %v, want only acct", tables)
+				}
+				if err := e.stop(); err != nil {
+					t.Errorf("graceful stop returned %v", err)
+				}
+			})
+		}
 	}
 }

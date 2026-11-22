@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -318,6 +319,38 @@ func TestResyncContinuesFromTheSavedCursorAfterARestart(t *testing.T) {
 	want := map[string]string{"1|": "a", "2|": "b", "3|": "c", "4|": "d"}
 	if got := live(t, h, "shop.items"); !equal(got, want) {
 		t.Errorf("rows = %v, want %v", got, want)
+	}
+}
+
+// TestASwapACrashInterruptedIsFinishedBeforeTheStream: a crash after the exchange of the swap leaves the
+// resync saved, and the old table under the name of the shadow table. The swap is finished at the
+// restart, before the stream: a change of the table written under that name would go with the old table.
+func TestASwapACrashInterruptedIsFinishedBeforeTheStream(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(1),
+	}})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.sink.marked = map[string]bool{"shop.items": true}
+	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
+	h.sink.tables["shop.items"] = map[string]cell{"1|": {version: 1, values: []any{int64(1), "a"}}}
+	h.sink.tables["shop.items__resync"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "old"}}}
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if n := h.sink.swapped(); n != 1 {
+		t.Errorf("the swap was finished %d times, want once: %v", n, h.journal.all())
+	}
+	want := map[string]string{"1|": "a", "2|": "b"}
+	if got := live(t, h, "shop.items"); !equal(got, want) {
+		t.Errorf("rows = %v, want %v", got, want)
+	}
+	if pos := h.store.current(); pos.Resync != "" {
+		t.Errorf("the resync is still saved: %s", pos.Resync)
 	}
 }
 
@@ -863,6 +896,662 @@ func TestThePositionIsSavedAsSoonAsATableIsReplaced(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("the finished resync was still in the saved state after the swap: %+v", entries)
+	}
+}
+
+// TestTheExchangeComesAfterThePositionHasTheTableReadInFull: the last chunk is taken in the same pass
+// as the swap. A crash after the exchange must not find the entry still reading: the restart would write
+// the changes of the table under the name of the shadow table, which then holds the old table.
+func TestTheExchangeComesAfterThePositionHasTheTableReadInFull(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{uuidTx(1, insertRows(items, 1, "a"))}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":1" {
+			asks(p, reply)()
+		}
+	}
+	// The clock stands still: no save comes from the flush interval between the read and the swap.
+	var atSwap checkpoint.Position
+	h.sink.onSwap = func(chsink.SwapRequest) { atSwap = h.store.current() }
+	h.source.until = func() bool { return h.sink.swapped() > 0 }
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if err := <-reply; err != nil {
+		t.Fatalf("the resync was refused: %v", err)
+	}
+
+	entries, err := checkpoint.DecodeResyncs(atSwap.Resync)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("the state saved at the moment of the swap = %q (%v), want the resync", atSwap.Resync, err)
+	}
+	if st := entries[0]; !st.Done || st.Final != fence(1) {
+		t.Errorf("the saved resync at the moment of the swap = %+v, want it read in full up to %s", st, fence(1))
+	}
+	saved, err := gtid.Parse(atSwap.GTIDSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := gtid.Parse(fence(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.Covers(final) {
+		t.Errorf("the position saved at the moment of the swap is %s, before the watermark %s", atSwap.GTIDSet, fence(1))
+	}
+}
+
+// TestEverySavedPositionOfARestartKeepsTheResyncsLeft: the resyncs of a position are resumed one by one,
+// and the first finishes a swap a crash interrupted while the next begins again, which saves the position.
+// A position saved on the way must not have only the entries resumed so far: a crash then would forget the
+// rest, and with them the rows of the tables their initial load had still to read.
+func TestEverySavedPositionOfARestartKeepsTheResyncsLeft(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.cfg.Tables.OnReplicationError = config.OnErrorStop
+	// The snapshot is taken past where the stream goes, so neither table left is swapped in this run.
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(9)}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{
+		{Table: "shop.a", Shadow: "a__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(1)},
+		{Table: "shop.b", Shadow: "b__resync", Version: 1, Since: fence(1), Pending: true},
+		{Table: "shop.c", Shadow: "c__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(9)},
+	})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.sink.marked = map[string]bool{"shop.a": true}
+	h.sink.shapes = map[string]chsink.TableShape{"shop.a__resync": {Exists: true}, "shop.c__resync": {Exists: true}}
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if n := h.sink.swapped(); n != 1 {
+		t.Errorf("swaps = %d, want the one of shop.a", n)
+	}
+	saves := h.store.all()
+	if len(saves) == 0 {
+		t.Fatal("no position was saved: the test proves nothing")
+	}
+	for i, pos := range saves {
+		entries, err := checkpoint.DecodeResyncs(pos.Resync)
+		if err != nil {
+			t.Fatal(err)
+		}
+		left := map[string]bool{}
+		for _, e := range entries {
+			left[e.Table] = true
+		}
+		if !left["shop.b"] || !left["shop.c"] {
+			t.Errorf("save %d of %d has the resyncs %v, want shop.b and shop.c among them", i+1, len(saves), entries)
+		}
+	}
+	if entries, _ := checkpoint.DecodeResyncs(saves[len(saves)-1].Resync); len(entries) != 2 {
+		t.Errorf("the last saved resyncs = %+v, want shop.b and shop.c", entries)
+	}
+}
+
+// TestAResyncWhoseShadowTableIsLostReadsEveryPartitionAgain: what a restart finds read into a shadow
+// table that is gone (dropped, or made again for a changed structure) is read again, every partition of
+// it: the reader goes on from a saved partition even without a cursor, and the partitions before it would
+// be missing from the table the swap puts in place of the full one. A table read in full whose shadow
+// table is gone, the table without the marker, was never swapped in as far as anything can tell: it is
+// read again too, not taken for swapped. And a second restart, right after the shadow table is made
+// again, still reads everything: the position says so before the table is made.
+func TestAResyncWhoseShadowTableIsLostReadsEveryPartitionAgain(t *testing.T) {
+	cursor, err := checkpoint.EncodeCursor([]any{int64(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatch := &chsink.SchemaMismatchError{Table: "`replica`.`items__resync`", Problems: []string{"column name is missing"}}
+	reading := checkpoint.Resync{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1),
+		Strategy: "partitioned", Partition: "p2", Cursor: cursor, Rows: 3,
+	}
+	atBoundary := reading
+	atBoundary.Cursor = nil
+	readInFull := reading
+	readInFull.Cursor, readInFull.Partition, readInFull.Rows, readInFull.Done = nil, "", 4, true
+	notReached, reached := readInFull, readInFull
+	notReached.Final, reached.Final = fence(5), fence(1)
+	tests := map[string]struct {
+		entry  checkpoint.Resync
+		shadow bool // the shadow table is there, and does not match the structure
+	}{
+		"gone inside a partition":                 {entry: reading},
+		"gone at the start of a partition":        {entry: atBoundary},
+		"made again for a new structure":          {entry: reading, shadow: true},
+		"read in full, gone before its watermark": {entry: notReached},
+		"read in full, gone after its watermark":  {entry: reached},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			items := itemsTable()
+			partitioned := itemsTable()
+			partitioned.Partitions = []string{"p1", "p2"}
+			setup := func(pos checkpoint.Position) *harness {
+				h := newHarness(t)
+				h.snapshot = &fakeSnapshot{
+					executed: fence(1),
+					def:      func() *schema.Table { return partitioned },
+					byPartition: map[string][][]any{
+						"p1": {{int64(1), "a"}, {int64(2), "b"}},
+						"p2": {{int64(3), "c"}, {int64(4), "d"}},
+					},
+				}
+				h.store.pos, h.store.found = pos, true
+				// What the table held before: a row the source does not have, and none of what it does.
+				h.sink.tables["shop.items"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "stale"}}}
+				h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 5, "e"))}
+				h.source.until = func() bool { return h.sink.swapped() > 0 }
+				return h
+			}
+			check := func(h *harness, when string) {
+				t.Helper()
+				want := map[string]string{"1|": "a", "2|": "b", "3|": "c", "4|": "d", "5|": "e"}
+				if got := live(t, h, "shop.items"); !equal(got, want) {
+					t.Errorf("%s: rows = %v, want %v", when, got, want)
+				}
+			}
+
+			h := setup(checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: checkpoint.EncodeResyncs([]checkpoint.Resync{tt.entry})})
+			if tt.shadow {
+				h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
+				h.sink.ensureErrs = map[int]error{1: mismatch}
+			}
+			var atEnsure checkpoint.Position
+			h.sink.onEnsure = func(t *chsink.Table) {
+				if t.Name == "items__resync" {
+					atEnsure = h.store.current()
+				}
+			}
+			if err := h.run(t); err != nil {
+				t.Fatalf("Run() = %v", err)
+			}
+			check(h, "after the restart")
+
+			// A crash right after the shadow table was made: it is there, empty, with the right structure.
+			again := setup(atEnsure)
+			again.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
+			if err := again.run(t); err != nil {
+				t.Fatalf("Run() after a second restart = %v", err)
+			}
+			check(again, "after a second restart right after the shadow table was made")
+		})
+	}
+}
+
+// TestAResyncBegunAgainAfterACrashDropsItsOwnShadowTable: a resync saved as pending begins again at the
+// restart and makes its shadow table; a crash before a position says so leaves that table, and the next
+// restart begins again from the same entry. The table is binwave's and holds nothing that is kept: found
+// as a leftover it would stop every restart that follows.
+func TestAResyncBegunAgainAfterACrashDropsItsOwnShadowTable(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.cfg.Tables.OnReplicationError = config.OnErrorStop
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Pending: true,
+	}})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
+	h.sink.marked = map[string]bool{"shop.items__resync": true}
+	h.sink.tables["shop.items__resync"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "read before"}}}
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+	h.source.until = func() bool { return h.sink.swapped() > 0 }
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	want := map[string]string{"1|": "a", "2|": "b"}
+	if got := live(t, h, "shop.items"); !equal(got, want) {
+		t.Errorf("rows = %v, want %v", got, want)
+	}
+}
+
+// TestWithDryRunARestartChangesNothingOfTheResyncs: ddl.dry_run runs nothing in ClickHouse, and every
+// step a resync has left after a restart does: a resync that begins again drops its own shadow table, a
+// swap a crash interrupted drops the old table and removes the marker, one that reads again makes its
+// shadow table. Replication stops before any of it, with the saved resyncs as they were.
+func TestWithDryRunARestartChangesNothingOfTheResyncs(t *testing.T) {
+	h := newHarness(t)
+	h.cfg.DDL.DryRun = true
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{
+		{Table: "shop.a", Shadow: "a__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(1)},
+		{Table: "shop.b", Shadow: "b__resync", Version: 1, Since: fence(1), Pending: true},
+		{Table: "shop.c", Shadow: "c__resync", Version: 1, Since: fence(1)},
+	})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.sink.marked = map[string]bool{"shop.a": true, "shop.b__resync": true}
+	h.sink.shapes = map[string]chsink.TableShape{"shop.b__resync": {Exists: true}}
+
+	resyncFailure(t, h.run(t), "shop.a")
+
+	if n := h.sink.swapped(); n != 0 || len(h.sink.drops) != 0 || len(h.sink.ensures) != 0 {
+		t.Errorf("swaps = %d, drops = %v, ensures = %v: dry_run must change nothing", n, h.sink.drops, h.sink.ensures)
+	}
+	if got := h.store.current().Resync; got != state {
+		t.Errorf("the saved resyncs = %s, want them as they were: %s", got, state)
+	}
+}
+
+// TestAShadowTableAWriteOfWhichFailedIsNotSwappedIn: the last insert into the shadow table fails in the
+// pass that would swap it in, the table is quarantined and its rows dropped. The shadow table does not
+// hold everything: the table is left as it was, and the resync given up.
+func TestAShadowTableAWriteOfWhichFailedIsNotSwappedIn(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{uuidTx(1, insertRows(items, 1, "a"))}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":1" {
+			asks(p, reply)()
+		}
+	}
+	h.sink.tables["shop.items"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "old"}}}
+	h.sink.insertErrsByTarget = map[string]error{"shop.items__resync": &chsink.TableError{Table: "shop.items", Err: errors.New("the insert was refused")}}
+	h.source.until = func() bool { return p.q.isQuarantined("shop.items") && len(p.resyncs) == 0 }
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if err := <-reply; err != nil {
+		t.Fatalf("the resync was refused: %v", err)
+	}
+
+	if n := h.sink.swapped(); n != 0 {
+		t.Errorf("the shadow table was swapped in %d times: %v", n, h.journal.all())
+	}
+	// Row 1 was written before the resync began (it begins at the end of transaction 1).
+	if got, want := live(t, h, "shop.items"), map[string]string{"1|": "a", "9|": "old"}; !equal(got, want) {
+		t.Errorf("rows = %v, want the table as it was: %v", got, want)
+	}
+	if pos := h.store.current(); pos.Resync != "" || !slices.Contains(quarantinedNames(pos), "shop.items") {
+		t.Errorf("saved resyncs %q, quarantine %v: want the resync given up and the table quarantined", pos.Resync, quarantinedNames(pos))
+	}
+}
+
+// TestAShadowTableLostBeforeTheSwapIsNotTakenForASwap: the shadow table is read in full, and dropped
+// while the stream catches up with its watermark. The swap finds nothing to put in place: the table is
+// left as it was and quarantined, not reported as resynchronized.
+func TestAShadowTableLostBeforeTheSwapIsNotTakenForASwap(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(3)}
+	h.obs = &fakeObserver{}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{
+		uuidTx(1, insertRows(items, 1, "a")), uuidTx(2, insertRows(items, 2, "b")), uuidTx(3, insertRows(items, 3, "c")),
+	}
+	h.source.beforeHandle = func(ev event.Event) {
+		b, ok := ev.(event.Begin)
+		switch {
+		case ok && b.GTID == testUUID+":1":
+			asks(p, reply)()
+		case ok && b.GTID == testUUID+":3":
+			h.sink.mu.Lock()
+			h.sink.lost = map[string]bool{"shop.items__resync": true}
+			h.sink.mu.Unlock()
+		}
+	}
+	h.sink.tables["shop.items"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "old"}}}
+	h.source.until = func() bool { return p.q.isQuarantined("shop.items") && len(p.resyncs) == 0 }
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if err := <-reply; err != nil {
+		t.Fatalf("the resync was refused: %v", err)
+	}
+
+	if n := h.sink.swapped(); n != 0 {
+		t.Errorf("a swap was taken for made %d times: %v", n, h.journal.all())
+	}
+	if got := h.obs.(*fakeObserver).sequence("resync-finished"); len(got) != 1 || got[0] != "resync-finished shop.items false" {
+		t.Errorf("finished = %v, want the resync reported as given up", got)
+	}
+	// Row 1 was written before the resync began (it begins at the end of transaction 1).
+	if got, want := live(t, h, "shop.items"), map[string]string{"1|": "a", "9|": "old"}; !equal(got, want) {
+		t.Errorf("rows = %v, want the table as it was: %v", got, want)
+	}
+}
+
+// TestACleanupThatFailsAfterTheExchangeDoesNotGiveTheResyncUp: the exchange was sent, and what follows
+// it fails as a problem of the table. Giving the resync up would drop the old table under the name of
+// the shadow table and leave the marker on the table, where the next resync of it takes the marker for
+// its own swap: replication stops instead, with the resync saved, and resuming finishes the swap.
+func TestACleanupThatFailsAfterTheExchangeDoesNotGiveTheResyncUp(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{uuidTx(1, insertRows(items, 1, "a"))}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":1" {
+			asks(p, reply)()
+		}
+	}
+	h.sink.swapFails = &swapFailure{sent: true, err: &chsink.TableError{Table: "shop.items", Err: errors.New("the old table could not be dropped")}}
+	h.source.until = heartbeatsFor(100)
+
+	resyncFailure(t, h.runPipeline(t, p), "shop.items")
+	if len(h.sink.drops) != 0 {
+		t.Errorf("drops = %v, want none", h.sink.drops)
+	}
+	if _, ok := savedResync(t, h); !ok {
+		t.Error("the resync is not saved: resuming could not finish the swap")
+	}
+}
+
+// TestAResyncDoesNotBeginOnATableThatCarriesTheMarker: the marker on the table says a swap of it was not
+// finished; the swap of a new resync would take it for its own and drop the shadow table it filled.
+func TestAResyncDoesNotBeginOnATableThatCarriesTheMarker(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{uuidTx(1, insertRows(items, 1, "a"))}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":1" {
+			asks(p, reply)()
+		}
+	}
+	h.sink.marked = map[string]bool{"shop.items": true}
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if err := <-reply; !chsink.IsConflict(err) {
+		t.Errorf("the resync answered %v, want a refusal for the marker", err)
+	}
+	if len(h.sink.ensures) != 1 { // the table itself, not a shadow table
+		t.Errorf("ensures = %v, want no shadow table made", h.sink.ensures)
+	}
+}
+
+// TestARestartGivesUpAResyncWhoseTableWasQuarantinedDuringIt: a write of the table failed during its
+// resync, and a position was saved with the table quarantined before the resync was given up. Its shadow
+// table may miss the rows dropped with the quarantine: the restart gives the resync up, not swaps it in.
+func TestARestartGivesUpAResyncWhoseTableWasQuarantinedDuringIt(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(1),
+	}})
+	quarantine := checkpoint.EncodeQuarantine([]checkpoint.Quarantined{{Table: "shop.items", Since: fence(1), Reason: "the insert was refused", At: epoch}})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state, Quarantine: quarantine}, true
+	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}}
+	h.sink.tables["shop.items__resync"] = map[string]cell{"1|": {version: 1, values: []any{int64(1), "a"}}}
+	h.sink.tables["shop.items"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "old"}}}
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if n := h.sink.swapped(); n != 0 {
+		t.Errorf("the shadow table was swapped in %d times", n)
+	}
+	if got, want := live(t, h, "shop.items"), map[string]string{"9|": "old"}; !equal(got, want) {
+		t.Errorf("rows = %v, want the table as it was: %v", got, want)
+	}
+	if pos := h.store.current(); pos.Resync != "" || !slices.Contains(quarantinedNames(pos), "shop.items") {
+		t.Errorf("saved resyncs %q, quarantine %v: want the resync given up and the table still quarantined", pos.Resync, quarantinedNames(pos))
+	}
+}
+
+// TestARestartThatGivesAResyncUpSavesItGone: a restart finds the shadow table gone and saves that the
+// table is read again, then cannot read the definition of the table and quarantines it. The position
+// must not keep the resync next to the quarantine: the next restart would try it again.
+func TestARestartThatGivesAResyncUpSavesItGone(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1), defErr: errors.New("the table is not there")}
+	cursor, err := checkpoint.EncodeCursor([]any{int64(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Cursor: cursor, Rows: 1,
+	}})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if pos := h.store.current(); pos.Resync != "" || !slices.Contains(quarantinedNames(pos), "shop.items") {
+		t.Errorf("saved resyncs %q, quarantine %v: want the resync gone and the table quarantined", pos.Resync, quarantinedNames(pos))
+	}
+}
+
+// TestAResyncDiscardedByAStatementIsSavedUntilItBeginsAgain: a statement discards a resync, which begins
+// again at the end of it. The flush it begins with saves the position: that position must have the
+// resync, as one that begins again, or a crash before the next save forgets it, and with it the rows of
+// the table the source had before.
+func TestAResyncDiscardedByAStatementIsSavedUntilItBeginsAgain(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(3)}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{
+		uuidTx(1, insertRows(items, 1, "a")),
+		uuidTx(2, insertRows(items, 2, "b")),
+		uuidTx(3, event.DDL{Database: "shop", Query: "ALTER TABLE items ADD COLUMN extra INT NULL", Time: epoch}),
+		uuidTx(4, insertRows(items, 4, "d")),
+	}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":2" {
+			asks(p, reply)()
+		}
+	}
+	var shadows int
+	var atSecond checkpoint.Position
+	h.sink.onEnsure = func(t *chsink.Table) {
+		if t.Name == "items__resync" {
+			if shadows++; shadows == 2 {
+				atSecond = h.store.current()
+			}
+		}
+	}
+	h.source.until = func() bool { return h.sink.swapped() > 0 }
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if shadows < 2 {
+		t.Fatalf("the shadow table was made %d times, want again after the statement", shadows)
+	}
+	entries, err := checkpoint.DecodeResyncs(atSecond.Resync)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Table != "shop.items" || !entries[0].Pending {
+		t.Errorf("the position saved when the resync began again has %+v, want shop.items to begin again", entries)
+	}
+}
+
+// TestAShadowTableLostBeforeItsFirstRowIsNotMadeAgain: the shadow table is gone before the stream
+// writes a row of the table to it. Binding the table must not make it again: an empty one would be
+// swapped in later without what the lost one had. The table is quarantined, the resync given up.
+func TestAShadowTableLostBeforeItsFirstRowIsNotMadeAgain(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(3)}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{
+		uuidTx(1, insertRows(items, 1, "a")), uuidTx(2, insertRows(items, 2, "b")), uuidTx(3, insertRows(items, 3, "c")),
+	}
+	h.source.beforeHandle = func(ev event.Event) {
+		b, ok := ev.(event.Begin)
+		switch {
+		case ok && b.GTID == testUUID+":1":
+			asks(p, reply)()
+		case ok && b.GTID == testUUID+":2":
+			h.sink.mu.Lock()
+			// Dropped by hand: a table made again under the name would carry the marker, and be swapped in.
+			delete(h.sink.shapes, "shop.items__resync")
+			delete(h.sink.tables, "shop.items__resync")
+			h.sink.mu.Unlock()
+		}
+	}
+	h.sink.tables["shop.items"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "old"}}}
+	h.source.until = func() bool { return p.q.isQuarantined("shop.items") && len(p.resyncs) == 0 }
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if err := <-reply; err != nil {
+		t.Fatalf("the resync was refused: %v", err)
+	}
+
+	if n := h.sink.swapped(); n != 0 {
+		t.Errorf("swapped in %d times: %v", n, h.journal.all())
+	}
+	if _, there := h.sink.shapes["shop.items__resync"]; there {
+		t.Errorf("the lost shadow table was made again: %v", h.journal.all())
+	}
+	// Row 1 was written before the resync began (it begins at the end of transaction 1).
+	if got, want := live(t, h, "shop.items"), map[string]string{"1|": "a", "9|": "old"}; !equal(got, want) {
+		t.Errorf("rows = %v, want the table as it was: %v", got, want)
+	}
+}
+
+// TestARestartDoesNotTouchATableThatTookTheNameOfTheShadowTable: while the service was down, a table
+// binwave did not make took the name of the shadow table. Nothing of it is written to, swapped in or
+// dropped: replication stops on the resync, which stays saved.
+func TestARestartDoesNotTouchATableThatTookTheNameOfTheShadowTable(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1)}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(1),
+	}})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.sink.foreign = map[string]bool{"shop.items__resync": true}
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+
+	err := h.run(t)
+	var failed *FailedError
+	if !errors.As(err, &failed) || failed.Failure.Code != string(errcode.SYNC104) {
+		t.Fatalf("Run() = %v, want replication failed with %s", err, errcode.SYNC104)
+	}
+	if n := h.sink.swapped(); n != 0 || len(h.sink.drops) != 0 || len(h.sink.ensures) != 0 {
+		t.Errorf("swaps = %d, drops = %v, ensures = %v: the table must not be touched", n, h.sink.drops, h.sink.ensures)
+	}
+	if _, ok := savedResync(t, h); !ok {
+		t.Error("the resync is not saved")
+	}
+}
+
+// TestWithQuarantineAPendingResyncThatCannotBeginAgainQuarantinesTheTable: a resync that has to begin
+// again after a statement, and cannot, quarantines its table with tables.on_replication_error:
+// quarantine, whether that happens right after the statement or after a restart.
+func TestWithQuarantineAPendingResyncThatCannotBeginAgainQuarantinesTheTable(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(1), defErr: errors.New("the source does not answer for the table")}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{{
+		Table: "shop.items", Shadow: "items__resync", Version: 1, Since: fence(1), Pending: true,
+	}})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.source.script = []scriptedTx{uuidTx(2, insertRows(items, 2, "b"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v, want replication to go on with the table quarantined", err)
+	}
+	if pos := h.store.current(); pos.Resync != "" || !slices.Contains(quarantinedNames(pos), "shop.items") {
+		t.Errorf("saved resyncs %q, quarantine %v: want the resync gone and the table quarantined", pos.Resync, quarantinedNames(pos))
+	}
+}
+
+// TestTheInitialLoadDoesNotTakeWhatAnEarlierResyncLeft: at the very first start, a table under the name
+// of a shadow table, or the marker of an unfinished swap on a table, is left from before. The load would
+// reuse the one (its rows beating the snapshot) or take the other for its own swap (a table never read
+// reported loaded): the table is quarantined instead, and nothing of it is touched.
+func TestTheInitialLoadDoesNotTakeWhatAnEarlierResyncLeft(t *testing.T) {
+	for name, leftover := range map[string]func(*fakeSink){
+		"a shadow table":        func(s *fakeSink) { s.marked = map[string]bool{"shop.items__resync": true} },
+		"the marker on a table": func(s *fakeSink) { s.marked = map[string]bool{"shop.items": true} },
+		"a table of that name":  func(s *fakeSink) { s.foreign = map[string]bool{"shop.items__resync": true} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			items := itemsTable()
+			h := newHarness(t)
+			h.cfg.Replication.InitialPosition = config.StartFromSnapshot
+			h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}, {int64(2), "b"}}, executed: fence(1)}
+			leftover(h.sink)
+			h.source.script = []scriptedTx{uuidTx(1, insertRows(items, 3, "c"))}
+
+			if err := h.run(t); err != nil {
+				t.Fatalf("Run() = %v", err)
+			}
+			if n := h.sink.swapped(); n != 0 || len(h.sink.drops) != 0 {
+				t.Errorf("swaps = %d, drops = %v: nothing left from before may be taken", n, h.sink.drops)
+			}
+			if pos := h.store.current(); pos.Resync != "" || !slices.Contains(quarantinedNames(pos), "shop.items") {
+				t.Errorf("saved resyncs %q, quarantine %v: want the table quarantined, not loaded", pos.Resync, quarantinedNames(pos))
+			}
+		})
+	}
+}
+
+// TestEveryExchangeComesAfterASavedPositionAtItsWatermark: two tables wait for the stream, one read at
+// u:1-2 and one at u:1-4. The save before the first exchange has both read in full, but the stream only
+// at the first watermark: the second exchange needs a save of its own.
+func TestEveryExchangeComesAfterASavedPositionAtItsWatermark(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{executed: fence(9)}
+	state := checkpoint.EncodeResyncs([]checkpoint.Resync{
+		{Table: "shop.a", Shadow: "a__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(2)},
+		{Table: "shop.b", Shadow: "b__resync", Version: 1, Since: fence(1), Rows: 1, Done: true, Final: fence(4)},
+	})
+	h.store.pos, h.store.found = checkpoint.Position{Tables: "{}", GTIDSet: fence(1), Version: 1, Resync: state}, true
+	h.sink.shapes = map[string]chsink.TableShape{"shop.a__resync": {Exists: true}, "shop.b__resync": {Exists: true}}
+	// The clock stands still: no save comes from the flush interval.
+	atSwap := map[string]string{}
+	h.sink.onSwap = func(req chsink.SwapRequest) { atSwap[req.Table] = h.store.current().GTIDSet }
+	h.source.script = []scriptedTx{
+		uuidTx(2, insertRows(items, 2, "b")), uuidTx(3, insertRows(items, 3, "c")), uuidTx(4, insertRows(items, 4, "d")),
+	}
+	h.source.until = func() bool { return h.sink.swapped() > 1 }
+
+	if err := h.run(t); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	for table, final := range map[string]string{"a": fence(2), "b": fence(4)} {
+		at, ok := atSwap[table]
+		if !ok {
+			t.Fatalf("shop.%s was not swapped in: %v", table, atSwap)
+		}
+		saved, err := gtid.Parse(at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := gtid.Parse(final)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !saved.Covers(want) {
+			t.Errorf("the position saved at the exchange of shop.%s is %s, before its watermark %s", table, at, final)
+		}
 	}
 }
 

@@ -513,6 +513,7 @@ func TestInitialLoadThatGivesUpIsQuarantinedLikeAResync(t *testing.T) {
 		results: make(chan chunkResult, 1),
 	}
 	p.resyncs["shop.items"] = job
+	h.sink.shapes = map[string]chsink.TableShape{"shop.items__resync": {Exists: true}} // made when the load began
 	job.results <- chunkResult{err: errors.New("connection refused")}
 
 	if _, err := p.takeChunks(context.Background(), job); err != nil {
@@ -657,7 +658,9 @@ func TestProgressIsReportedWhenAnAttemptBegins(t *testing.T) {
 func doneLoads(t testing.TB, h *harness, n int) *Pipeline {
 	t.Helper()
 	entries := make([]checkpoint.Resync, n)
+	h.sink.shapes = map[string]chsink.TableShape{}
 	for i := range entries {
+		h.sink.shapes[fmt.Sprintf("shop.t%04d__resync", i)] = chsink.TableShape{Exists: true} // the shadow tables wait for the swap
 		entries[i] = checkpoint.Resync{
 			Table: fmt.Sprintf("shop.t%04d", i), Shadow: fmt.Sprintf("t%04d__resync", i), Since: fence(0),
 			// Read at a point the stream is nowhere near: the watermarks grow with the tables, as

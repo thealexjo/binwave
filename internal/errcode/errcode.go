@@ -97,7 +97,7 @@ const (
 	SYNC101 Code = "SYNC101" // reading a chunk failed repeatedly; the resync or initial load gave up
 	SYNC102 Code = "SYNC102" // the shadow table is gone; the resync starts again from the first row
 	SYNC103 Code = "SYNC103" // the table's structure changed while the service was down; the resync starts again from the first row
-	SYNC104 Code = "SYNC104" // the shadow table could not be dropped; it needs a manual DROP before the table can be resynchronized again
+	SYNC104 Code = "SYNC104" // the name of the shadow table is taken (a leftover, or a table binwave did not make), or the marker of an unfinished swap is on the table; it needs a manual DROP (or the marker removed) before the table can be resynchronized
 	SYNC105 Code = "SYNC105" // a DDL statement reached the table during its resync or initial load; progress is discarded and it starts again
 	SYNC201 Code = "SYNC201" // tables.autoresync started resynchronizing a quarantined table on its own
 	SYNC202 Code = "SYNC202" // tables.autoresync could not read or start resynchronizing the table; it stays quarantined

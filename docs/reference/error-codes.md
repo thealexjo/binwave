@@ -92,7 +92,7 @@ The process is alive, `binwave replication status` shows the GTID and the reason
 | `SYNC101` | reading a chunk failed five times in a row with an error that does not go away by itself (an unavailable source does not count: the resync waits it out) — the resync or load gave up | depends on the reason (see `recoverable` of the record) | `binwave tables resync` once more, after sorting out the reason; with `on_replication_error: stop` the resync is kept and replication stops: `binwave replication resume` |
 | `SYNC102` | the shadow table disappeared — starting over | — | informational, nothing to do |
 | `SYNC103` | the structure changed while the service was not running — starting over | — | informational |
-| `SYNC104` | the shadow table could not be dropped | — | drop it manually (`DROP TABLE`); it is the table marked as a binwave shadow (comment) |
+| `SYNC104` | the shadow table could not be dropped, or its name is taken by a leftover or by a table binwave did not make, or a table carries the marker of a swap that was not finished | — | drop the table under the shadow name manually (`DROP TABLE`) if it is not needed, or rename it; remove a leftover marker (`ALTER TABLE ... MODIFY COMMENT ''`) once the table is the one to keep; then resync the table (`replication resume` when replication stopped) |
 | `SYNC105` | DDL during a resync or initial load — progress is reset, starting over | — | informational, it will be retried automatically |
 | `SYNC201` | `tables.autoresync` started a resync by itself | — | informational |
 | `SYNC202` | `tables.autoresync` could not read or start — the table stays in quarantine | — | look at `tables list`, sort it out manually |

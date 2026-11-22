@@ -83,6 +83,7 @@ type resyncJob struct {
 	final      *gtid.Set
 	finalCount int64
 	lostFinal  error // state.Final does not parse: the resync is given up when the queue reaches it
+	doneSaved  bool  // a saved position has the job read in full (Done, Final)
 }
 
 type chunkResult struct {
@@ -207,11 +208,17 @@ func (p *Pipeline) Resyncs() []snapshot.Status {
 	return append([]snapshot.Status(nil), p.rs.statuses...)
 }
 
-// encodeResyncs renders the state of the resyncs for the position.
+// encodeResyncs renders the state of the resyncs for the position: the registered jobs, and while a
+// restart resumes them, the saved entries it has not finished with.
 func (p *Pipeline) encodeResyncs() string {
-	entries := make([]checkpoint.Resync, 0, len(p.resyncs))
+	entries := make([]checkpoint.Resync, 0, len(p.resyncs)+len(p.resumeLeft))
 	for _, j := range p.resyncs {
 		entries = append(entries, j.state)
+	}
+	for name, st := range p.resumeLeft {
+		if _, registered := p.resyncs[name]; !registered {
+			entries = append(entries, st)
+		}
 	}
 	return checkpoint.EncodeResyncs(entries)
 }
@@ -247,6 +254,11 @@ func (p *Pipeline) materializeResyncs() {
 func (p *Pipeline) loading() bool {
 	for _, j := range p.resyncs {
 		if j.state.InitialLoad {
+			return true
+		}
+	}
+	for _, st := range p.resumeLeft {
+		if st.InitialLoad {
 			return true
 		}
 	}
@@ -369,6 +381,19 @@ func (p *Pipeline) resumeResyncs(ctx context.Context, pos checkpoint.Position) e
 	if len(entries) == 0 {
 		return nil
 	}
+	if p.cfg.DDL.DryRun {
+		// A resync creates, swaps and drops tables, and the first of them may be the next step. Replication
+		// stops before it, with every entry saved as it is, to go on once dry_run is off.
+		return p.holdResync(entries[0].Table, errcode.SYNC101, errors.New("the saved position has resyncs to continue, and ddl.dry_run is set: "+
+			"a resync creates, swaps and drops tables; turn dry_run off to continue them"))
+	}
+	// A position saved on the way (a resync that begins again flushes, one that reads again saves that it
+	// does) has the entries not resumed yet: each can be resumed again after another crash.
+	p.resumeLeft = make(map[string]checkpoint.Resync, len(entries))
+	for _, st := range entries {
+		p.resumeLeft[st.Table] = st
+	}
+	defer func() { p.resumeLeft = nil }()
 	var initialLoad, resync int
 	for i, st := range entries {
 		if st.InitialLoad {
@@ -379,11 +404,22 @@ func (p *Pipeline) resumeResyncs(ctx context.Context, pos checkpoint.Position) e
 		if err := p.resumeResync(ctx, st); err != nil {
 			return err
 		}
+		delete(p.resumeLeft, st.Table)
+		if _, kept := p.resyncs[st.Table]; !kept {
+			p.syncResyncs() // swapped in, or given up: the saved list must lose it
+		}
 		if p.hooks.Progress != nil {
 			p.hooks.Progress()
 		}
 		if done := i + 1; done%resyncResumeReportEvery == 0 && done < len(entries) {
 			p.log.Info("resyncs resuming", "done", done, "total", len(entries))
+		}
+	}
+	p.resumeLeft = nil
+	if p.resyncsStale {
+		// A swap was finished or a resync began again: saved at once, as after a swap in the stream.
+		if err := p.flush(ctx); err != nil {
+			return err
 		}
 	}
 	p.log.Info("resyncs resumed", "total", len(entries), "initial_load", initialLoad, "resync", resync)
@@ -408,11 +444,58 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	if err != nil {
 		return err
 	}
-	if st.Done {
-		// Only the stream reaching the last watermark, and the swap, are left.
+	marks, err := p.swapMarks(ctx, job)
+	if err != nil {
+		return err
+	}
+	exchanged := marks.Table
+	if !exchanged && marks.ShadowExists && !marks.Shadow {
+		// The name of the shadow table is taken by a table binwave did not make (the old table under it
+		// after an exchange carries no marker either, but then the table carries it): nothing of it is
+		// written to, swapped in or dropped.
+		p.resyncs[st.Table] = job
+		return p.holdResync(st.Table, errcode.SYNC104, &chsink.ConflictError{Err: fmt.Errorf(
+			"ClickHouse has the table %s.%s without the marker of the resync of %s, which binwave did not make; "+
+				"rename or drop it in ClickHouse to continue the resync", tdb, st.Shadow, st.Table)})
+	}
+	if !exchanged && p.q.isQuarantined(st.Table) {
+		// A resync takes its table out of quarantine when it begins: one that is in it again was
+		// quarantined during the resync, and saved before the resync was given up. Its shadow table may
+		// miss the rows that were dropped with the quarantine.
+		p.log.Warn("resync given up: the table was quarantined", "table", st.Table)
+		p.dropShadow(ctx, st.Table, st.Shadow)
+		p.syncResyncs()
+		return nil
+	}
+	if st.Done && !exchanged && !shape.Exists {
+		// Read in full, and the shadow table is gone with the table never given its marker: the swap was
+		// not made, or it was finished and its end not saved. Which, nothing in ClickHouse says, and taking
+		// it for finished would leave the table without everything the shadow table had: it is read again.
+		p.log.Warn("resync restarted: shadow table gone", "table", st.Table, "shadow", tdb+"."+st.Shadow)
+		job.state.Done, job.state.Final = false, ""
+		readFromStart(&job.state)
+		if err := p.saveResumed(ctx, job.state); err != nil {
+			return err
+		}
+		st = job.state
+	}
+	if st.Done || exchanged {
+		// Only the stream reaching the last watermark, and the swap, are left. An exchange is made only
+		// once the shadow table holds everything, also when the entry (saved by an earlier release) does
+		// not say the read is done.
+		job.doneSaved = st.Done
 		p.forgetTable(st.Table)
 		p.resyncs[st.Table] = job
 		p.trackResync(st.Table, job)
+		if exchanged {
+			// The swap a crash interrupted is finished before the stream goes on: its changes of the
+			// table would go to the name of the shadow table, which holds the old table or nothing.
+			if _, err := p.swapIn(ctx, job, true); err != nil {
+				return err
+			}
+			p.syncResyncs()
+			return nil
+		}
 		p.log.Debug("resync continues, waiting for the stream",
 			"table", st.Table, "final", st.Final, "initial_load", st.InitialLoad)
 		return nil
@@ -429,7 +512,7 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 			p.resyncs[st.Table] = job
 			return p.holdResync(st.Table, errcode.SYNC101, fmt.Errorf("could not continue after a restart: %w", err))
 		}
-		p.dropShadow(ctx, tdb, st.Shadow)
+		p.dropShadow(ctx, st.Table, st.Shadow)
 		p.restoreQuarantine(st, "could not continue after a restart: "+err.Error())
 		return nil //nolint:nilerr // the resync is what failed; the stream goes on and the table is quarantined
 	}
@@ -437,10 +520,13 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	if err != nil {
 		return err
 	}
-	if !shape.Exists && len(st.Cursor) > 0 {
-		// The rows before the cursor were in the shadow table, and it is gone: they would be missing.
+	if !shape.Exists && readSome(st) {
+		// The rows read so far were in the shadow table, and it is gone: they would be missing.
 		p.log.Warn("resync restarted: shadow table gone", "table", st.Table, "shadow", tdb+"."+st.Shadow)
-		job.state.Cursor, job.state.Rows = nil, 0
+		readFromStart(&job.state)
+		if err := p.saveResumed(ctx, job.state); err != nil {
+			return err
+		}
 	}
 	if err := p.withRetry(ctx, "prepare the shadow table "+st.Shadow, func(actx context.Context) error {
 		return p.d.Sink.Ensure(actx, target, chsink.DDL{Mode: p.cfg.DDL.Mode})
@@ -449,8 +535,12 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 		if errors.As(err, &mismatch) {
 			// The table was changed while the service was down: what was read is in the old structure.
 			p.log.Warn("resync restarted: table changed while stopped", "table", st.Table)
-			p.dropShadow(ctx, tdb, st.Shadow)
-			job.state.Cursor, job.state.Rows, job.state.Restarts = nil, 0, st.Restarts+1
+			readFromStart(&job.state)
+			job.state.Restarts = st.Restarts + 1
+			if err := p.saveResumed(ctx, job.state); err != nil {
+				return err
+			}
+			p.dropShadow(ctx, st.Table, st.Shadow)
 			if err := p.withRetry(ctx, "prepare the shadow table "+st.Shadow, func(actx context.Context) error {
 				return p.d.Sink.Ensure(actx, target, chsink.DDL{Mode: p.cfg.DDL.Mode})
 			}); err != nil {
@@ -475,6 +565,27 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	}
 	p.log.Debug("resync continues after a restart", "table", st.Table, "rows_read", job.state.Rows)
 	return nil
+}
+
+// saveResumed saves the position with a resync that a restart makes read the table again, before its
+// shadow table is made again: a crash after that would find an empty shadow table, and the saved place
+// would skip what is before it.
+func (p *Pipeline) saveResumed(ctx context.Context, st checkpoint.Resync) error {
+	p.resumeLeft[st.Table] = st
+	p.syncResyncs()
+	return p.flush(ctx)
+}
+
+// readSome reports whether a resync read anything into its shadow table: a cursor, or a partition it
+// goes on from (which is all there is at the boundary of two partitions).
+func readSome(st checkpoint.Resync) bool {
+	return len(st.Cursor) > 0 || st.Partition != "" || st.Rows > 0
+}
+
+// readFromStart makes a resync read the table from the start: the reader goes on from a partition even
+// without a cursor.
+func readFromStart(st *checkpoint.Resync) {
+	st.Cursor, st.Partition, st.Rows = nil, "", 0
 }
 
 // tablesToLoad decides, once, at the moment replication starts for the first time (initial_position:
@@ -518,8 +629,25 @@ func (p *Pipeline) tablesToLoad(ctx context.Context, since string) ([]checkpoint
 			}
 			continue
 		}
+		shadow := chsink.ShadowName(p.cfg, t.Database, t.Name)
+		tdb, ttable := chsink.TargetName(p.cfg, t.Database, t.Name)
+		marks, err := p.marksOf(ctx, chsink.SwapRequest{Source: t.FullName(), Database: tdb, Table: ttable, Shadow: shadow})
+		if err != nil {
+			return nil, fmt.Errorf("list the tables of the initial load: %w", err)
+		}
+		if marks.ShadowExists || marks.Table {
+			// What a resync checks before it begins (startResync): a table under the name of the shadow
+			// table, or the marker of an unfinished swap on the table, is left from before, and the load
+			// would reuse it or take it for its own swap.
+			reason := fmt.Sprintf("ClickHouse has %s.%s, or %s.%s carries the marker of a resync, left from before; "+
+				"drop the leftover (or remove the marker) and resync the table", tdb, shadow, tdb, ttable)
+			if !p.Quarantine(t.FullName(), errcode.SYNC104, reason) {
+				return nil, &chsink.ConflictError{Err: fmt.Errorf("%s cannot be part of the initial load: %s", t.FullName(), reason)}
+			}
+			continue
+		}
 		entries = append(entries, checkpoint.Resync{
-			Table: t.FullName(), Shadow: chsink.ShadowName(p.cfg, t.Database, t.Name), Since: since, Started: now, InitialLoad: true,
+			Table: t.FullName(), Shadow: shadow, Since: since, Started: now, InitialLoad: true,
 			Estimate: t.EstimatedRows,
 		})
 	}
@@ -590,12 +718,27 @@ func (p *Pipeline) shape(ctx context.Context, database, table string) (chsink.Ta
 	return shape, err
 }
 
-func (p *Pipeline) dropShadow(ctx context.Context, database, shadow string) {
-	err := p.withRetry(ctx, "drop the shadow table "+shadow, func(actx context.Context) error {
-		return p.d.Sink.DropTable(actx, chsink.DropRequest{Source: shadow, Database: database, Table: shadow})
+// dropShadow drops the shadow table of the resync of a source table, if it is binwave's: a table that
+// took its name without the marker is not touched.
+func (p *Pipeline) dropShadow(ctx context.Context, name, shadow string) {
+	db, table, _ := cutQualified(name)
+	tdb, ttable := chsink.TargetName(p.cfg, db, table)
+	marks, err := p.marksOf(ctx, chsink.SwapRequest{Source: name, Database: tdb, Table: ttable, Shadow: shadow})
+	if err != nil {
+		p.log.Error("shadow table not dropped, drop it by hand", "shadow", tdb+"."+shadow, "error", err)
+		return
+	}
+	if !marks.Shadow {
+		if marks.ShadowExists {
+			p.log.Warn("table not dropped: it has the name of a shadow table, without the marker", "table", name, "shadow", tdb+"."+shadow)
+		}
+		return
+	}
+	err = p.withRetry(ctx, "drop the shadow table "+shadow, func(actx context.Context) error {
+		return p.d.Sink.DropTable(actx, chsink.DropRequest{Source: shadow, Database: tdb, Table: shadow})
 	})
 	if err != nil {
-		p.log.Error("shadow table not dropped, drop it by hand", "shadow", database+"."+shadow, "error", err)
+		p.log.Error("shadow table not dropped, drop it by hand", "shadow", tdb+"."+shadow, "error", err)
 	}
 }
 
@@ -633,17 +776,25 @@ func (p *Pipeline) holdResync(name string, code errcode.Code, err error) error {
 	return &FailedError{Failure: f, Err: err}
 }
 
-// holdPending keeps a resync that has to begin again in the position, and stops replication on it.
-func (p *Pipeline) holdPending(j restartJob, err error) error {
+// registerPending keeps a resync that has to begin again in the position, as one that has to: a
+// restart begins it then, and until it begins its table is written as it is.
+func (p *Pipeline) registerPending(j restartJob) {
 	db, table, _ := cutQualified(j.name)
 	st := checkpoint.Resync{
 		Table: j.name, Shadow: chsink.ShadowName(p.cfg, db, table), Version: p.versions.Last(), Since: p.committed.GTIDSet,
 		Quarantined: j.quarantined, Restarts: j.restarts, Started: p.d.Now(),
 		InitialLoad: j.origin.initialLoad, Autoresync: j.origin.autoresync, Pending: true,
 	}
-	p.resyncs[j.name] = &resyncJob{state: st}
+	job := &resyncJob{state: st}
+	job.status = p.statusOf(job, snapshot.Progress{Fraction: -1})
+	p.resyncs[j.name] = job
 	p.resyncSetChanged = true
 	p.syncResyncs()
+}
+
+// holdPending keeps a resync that has to begin again in the position, and stops replication on it.
+func (p *Pipeline) holdPending(j restartJob, err error) error {
+	p.registerPending(j)
 	return p.holdResync(j.name, errcode.SYNC101, fmt.Errorf("could not begin again after a DDL statement: %w", err))
 }
 
@@ -994,6 +1145,7 @@ func (p *Pipeline) swapReady(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("the committed position cannot be read back: %w", err)
 	}
+	var saved *gtid.Set // the saved position, parsed once a table is ready to be swapped in
 	did := false
 	for len(p.awaiting) > 0 {
 		job := p.awaiting[0]
@@ -1011,6 +1163,25 @@ func (p *Pipeline) swapReady(ctx context.Context) (bool, error) {
 		}
 		if !committed.Covers(job.final) {
 			break
+		}
+		if saved == nil {
+			if saved, err = gtid.Parse(p.saved.GTIDSet); err != nil {
+				saved = nil // nothing it covers is known: the save below replaces it
+			}
+		}
+		if !job.doneSaved || saved == nil || !saved.Covers(job.final) {
+			// The exchange comes after a saved position that has the table read in full, with the stream
+			// at its watermark and every row written: a restart that found the read still going would
+			// write the changes of the table under the name of the shadow table, which holds the old one.
+			// One save covers every table the stream has reached, so a burst of swaps pays for one.
+			p.syncResyncs()
+			if err := p.flush(ctx); err != nil {
+				return did, err
+			}
+			for _, j := range p.awaiting {
+				j.doneSaved = true
+			}
+			saved = committed
 		}
 		finished, err := p.finishIfReady(ctx, job, committed)
 		if err != nil {
@@ -1081,7 +1252,7 @@ type resyncOrigin struct {
 // slot: the only origin held to replication.snapshot.parallelism, since it is the only one that can
 // mean hundreds of tables at once). Its definition is what the snapshot reads with.
 func (p *Pipeline) startResync(ctx context.Context, name string, def *schema.Table, quarantined string, restarts int, origin resyncOrigin) error {
-	if _, active := p.resyncs[name]; active {
+	if job, active := p.resyncs[name]; active && !job.state.Pending {
 		return fmt.Errorf("%s is being resynchronized already", name)
 	}
 	if p.cfg.DDL.DryRun {
@@ -1121,6 +1292,16 @@ func (p *Pipeline) startResync(ctx context.Context, name string, def *schema.Tab
 	if shape.Exists {
 		return &chsink.ConflictError{Err: fmt.Errorf("ClickHouse has the table %s.%s, left by a resync of %s that did not finish or was given up; "+
 			"binwave does not reuse or drop it: drop it in ClickHouse and start the resync again", tdb, shadow, name)}
+	}
+	// The marker on the table says a swap of it was made and not cleaned up: the swap of this resync
+	// would take it for its own, and drop the shadow table it filled.
+	marks, err := p.swapMarks(ctx, &resyncJob{state: checkpoint.Resync{Table: name, Shadow: shadow}})
+	if err != nil {
+		return err
+	}
+	if marks.Table {
+		return &chsink.ConflictError{Err: fmt.Errorf("the table %s.%s carries the marker of a resync whose swap was not finished; "+
+			"remove it (ALTER TABLE ... MODIFY COMMENT '') once the table is the one to keep, and start the resync again", tdb, ttable)}
 	}
 	target, err := p.shadowTable(def, shadow)
 	if err != nil {
@@ -1249,19 +1430,67 @@ func (p *Pipeline) finishIfReady(ctx context.Context, job *resyncJob, committed 
 	if !committed.Covers(job.final) {
 		return false, nil
 	}
+	return p.swapIn(ctx, job, false)
+}
+
+// swapRequest is the swap of the shadow table of a job in the place of its table.
+func (p *Pipeline) swapRequest(job *resyncJob) chsink.SwapRequest {
+	name := job.state.Table
+	db, table, _ := cutQualified(name)
+	tdb, ttable := chsink.TargetName(p.cfg, db, table)
+	return chsink.SwapRequest{Source: name, Database: tdb, Table: ttable, Shadow: job.state.Shadow}
+}
+
+// swapMarks reads which of the table and the shadow table of a job carries its marker.
+func (p *Pipeline) swapMarks(ctx context.Context, job *resyncJob) (chsink.SwapMarks, error) {
+	return p.marksOf(ctx, p.swapRequest(job))
+}
+
+// marksOf reads which of the table and the shadow table of a swap carries its marker.
+func (p *Pipeline) marksOf(ctx context.Context, req chsink.SwapRequest) (chsink.SwapMarks, error) {
+	var marks chsink.SwapMarks
+	err := p.withRetry(ctx, "read the swap of "+req.Source, func(actx context.Context) error {
+		var err error
+		marks, err = p.d.Sink.SwapMarks(actx, req)
+		return err
+	})
+	if err != nil {
+		return chsink.SwapMarks{}, fmt.Errorf("resync %s: %w", req.Source, err)
+	}
+	return marks, nil
+}
+
+// swapIn replaces the table with the shadow table of a job that is complete, and ends the job. exchanged
+// says a restart found the exchange made: only the cleanup after it is left.
+func (p *Pipeline) swapIn(ctx context.Context, job *resyncJob, exchanged bool) (bool, error) {
 	// The rows come first: the shadow table must hold everything before it takes the table's place. The
 	// position that no longer has this resync is saved by serviceResyncs right after the pass, so a
 	// restart does not find an entry whose shadow table is gone and read the whole table again.
 	if err := p.flushBuffers(ctx); err != nil {
 		return false, err
 	}
-	name := job.state.Table
-	db, table, _ := cutQualified(name)
-	tdb, ttable := chsink.TargetName(p.cfg, db, table)
+	req := p.swapRequest(job)
+	name, tdb, ttable := req.Source, req.Database, req.Table
+	if !exchanged && p.q.isQuarantined(name) {
+		// A write of the table failed in this pass, and its rows were dropped with the quarantine: the
+		// shadow table does not hold everything, and does not take the table's place.
+		p.log.Warn("resync given up: the table was quarantined", "table", name)
+		p.abortResync(ctx, name, "the table was quarantined again", false)
+		return true, nil
+	}
+	req.Exchanged = exchanged
 	err := p.withRetry(ctx, "replace "+name+" with its resynchronized copy", func(actx context.Context) error {
-		return p.d.Sink.SwapShadow(actx, chsink.SwapRequest{Source: name, Database: tdb, Table: ttable, Shadow: job.state.Shadow})
+		sent, err := p.d.Sink.SwapShadow(actx, req)
+		req.Exchanged = req.Exchanged || sent // a repeat may find the swap finished by the attempt before
+		return err
 	})
 	if err != nil {
+		if req.Exchanged {
+			// The table is the copy already, or may be: giving the resync up would drop what now has the
+			// name of the shadow table and leave the marker on the table, where the next resync would take
+			// it for its own swap. Replication stops, and resuming finishes the swap.
+			return false, p.holdResync(name, errcode.SYNC101, fmt.Errorf("the table was replaced with its copy, and the cleanup after it failed: %w", err))
+		}
 		if chsink.IsTableProblem(err) {
 			if p.holdsResyncs() {
 				return false, p.holdResync(name, errcode.SYNC101, fmt.Errorf("the table could not be replaced with its copy: %w", err))
@@ -1302,9 +1531,7 @@ func (p *Pipeline) abortResync(ctx context.Context, name, why string, restore bo
 	delete(p.resyncs, name)
 	p.resyncSetChanged = true
 	p.untrackResync(name)
-	db, table, _ := cutQualified(name)
-	tdb, _ := chsink.TargetName(p.cfg, db, table)
-	p.dropShadow(ctx, tdb, job.state.Shadow)
+	p.dropShadow(ctx, name, job.state.Shadow)
 	p.forgetTable(name)
 	p.dropShadowBuffers(name, job.state.Shadow)
 	p.d.Observer.ResyncFinished(name, false)
@@ -1440,10 +1667,14 @@ func (p *Pipeline) interruptResyncs(ctx context.Context, e event.DDL, impacts []
 			}
 			continue
 		}
-		p.restarting = append(p.restarting, restartJob{
+		j := restartJob{
 			name: im.table, quarantined: state.Quarantined, restarts: state.Restarts + 1,
 			origin: resyncOrigin{initialLoad: state.InitialLoad, autoresync: state.Autoresync},
-		})
+		}
+		p.restarting = append(p.restarting, j)
+		// Saved as one that has to begin again until it does: a position saved before that (the statement
+		// itself, the flush the new resync begins with) must not forget it.
+		p.registerPending(j)
 	}
 }
 
@@ -1478,6 +1709,9 @@ func (p *Pipeline) restartInterrupted(ctx context.Context) error {
 				held = hold
 			}
 		default:
+			delete(p.resyncs, j.name)
+			p.resyncSetChanged = true
+			p.syncResyncs()
 			p.quarantine(j.name, errcode.SYNC101, "could not begin again after a DDL statement: "+err.Error(), j.origin.autoresync)
 		}
 	}
@@ -1491,6 +1725,16 @@ func (p *Pipeline) beginPending(ctx context.Context, st checkpoint.Resync) error
 		origin: resyncOrigin{initialLoad: st.InitialLoad, autoresync: st.Autoresync},
 	}
 	db, table, _ := cutQualified(st.Table)
+	// A crash after the resync began again, before a position said so, leaves its shadow table: it is
+	// binwave's (the marker says so) and holds nothing that is kept, since the read begins from the start.
+	marks, err := p.swapMarks(ctx, &resyncJob{state: st})
+	if err != nil {
+		return err
+	}
+	if marks.Shadow {
+		p.log.Info("shadow table of a resync begun again dropped", "table", st.Table, "shadow", st.Shadow)
+		p.dropShadow(ctx, st.Table, st.Shadow)
+	}
 	def, err := p.tableDefinition(ctx, db, table)
 	if err == nil {
 		err = p.startResync(ctx, j.name, def, j.quarantined, j.restarts, j.origin)
@@ -1500,7 +1744,11 @@ func (p *Pipeline) beginPending(ctx context.Context, st checkpoint.Resync) error
 		return nil
 	case ctx.Err() != nil:
 		return fmt.Errorf("begin the resync of %s again: %w", st.Table, ctx.Err())
-	default:
+	case p.holdsResyncs():
 		return p.holdPending(j, err)
+	default:
+		// As when it cannot begin again right after the statement (restartInterrupted).
+		p.quarantine(j.name, errcode.SYNC101, "could not begin again after a DDL statement: "+err.Error(), j.origin.autoresync)
+		return nil
 	}
 }
