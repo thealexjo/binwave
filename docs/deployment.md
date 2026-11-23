@@ -71,7 +71,7 @@ GRANT SELECT ON replica.* TO reader;
 Every release has static binaries for Linux (`amd64`, `arm64`) with the unit files and the config example, and an image `ghcr.io/thealexjo/binwave` for both architectures:
 
 ```bash
-VERSION=0.1.0
+VERSION=0.1.1
 ARCH=amd64     # uname -m on the host: x86_64 → amd64, aarch64 → arm64
 curl -fsSLO https://github.com/thealexjo/binwave/releases/download/v$VERSION/binwave_${VERSION}_linux_$ARCH.tar.gz
 curl -fsSLO https://github.com/thealexjo/binwave/releases/download/v$VERSION/checksums.txt
