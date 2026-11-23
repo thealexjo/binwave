@@ -448,15 +448,21 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	if err != nil {
 		return err
 	}
-	exchanged := marks.Table
+	// The exchange was made when the table carries the marker, or is the shadow table by its UUID: then
+	// with no marker on it the swap was finished and its end not saved.
+	exchanged := marks.Table || marks.Swapped
 	if !exchanged && marks.ShadowExists && !marks.Shadow {
-		// The name of the shadow table is taken by a table binwave did not make (the old table under it
-		// after an exchange carries no marker either, but then the table carries it): nothing of it is
-		// written to, swapped in or dropped.
+		// The name of the shadow table is taken by a table binwave did not make, without the marker or of
+		// another UUID (the old table under it after an exchange carries no marker either, but then the
+		// table carries it or is the shadow table): nothing of it is written to, swapped in or dropped.
 		p.resyncs[st.Table] = job
+		made := "its marker"
+		if st.ShadowUUID != "" {
+			made += " and the UUID " + st.ShadowUUID
+		}
 		return p.holdResync(st.Table, errcode.SYNC104, &chsink.ConflictError{Err: fmt.Errorf(
-			"ClickHouse has the table %s.%s without the marker of the resync of %s, which binwave did not make; "+
-				"rename or drop it in ClickHouse to continue the resync", tdb, st.Shadow, st.Table)})
+			"ClickHouse has the table %s.%s, which is not the one binwave made for the resync of %s (with %s); "+
+				"rename or drop it in ClickHouse to continue the resync", tdb, st.Shadow, st.Table, made)})
 	}
 	if !exchanged && p.q.isQuarantined(st.Table) {
 		// A resync takes its table out of quarantine when it begins: one that is in it again was
@@ -469,12 +475,14 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	}
 	if !exchanged && !shape.Exists && (st.Done || readSome(st)) {
 		// The rows read so far were in the shadow table, and it is gone: they would be missing. Read in full,
-		// with the table never given its marker, the swap was not made, or it was finished and its end not
-		// saved. Which, nothing in ClickHouse says, and taking it for finished would leave the table without
-		// what the shadow table had: the table is read again.
+		// the swap was not made: the table is not the shadow table and carries no marker (a resync saved
+		// without the UUID cannot tell a swap finished and its end not saved, and taking it for finished
+		// would leave the table without what the shadow table had). The table is read again, into a shadow
+		// table with a new UUID, saved before it is made.
 		p.log.Warn("resync restarted: shadow table gone", "table", st.Table, "shadow", tdb+"."+st.Shadow)
 		job.state.Done, job.state.Final = false, ""
 		readFromStart(&job.state)
+		job.state.ShadowUUID = p.d.NewUUID()
 		if err := p.saveResumed(ctx, job.state); err != nil {
 			return err
 		}
@@ -517,31 +525,28 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 		p.restoreQuarantine(st, "could not continue after a restart: "+err.Error())
 		return nil //nolint:nilerr // the resync is what failed; the stream goes on and the table is quarantined
 	}
-	target, err := p.shadowTable(def, st.Shadow)
+	target, err := p.shadowTable(def, st.Shadow, st.ShadowUUID)
 	if err != nil {
 		return err
 	}
-	ensure := func() error {
-		return p.withRetry(ctx, "prepare the shadow table "+st.Shadow, func(actx context.Context) error {
-			return p.d.Sink.Ensure(actx, target, chsink.DDL{Mode: p.cfg.DDL.Mode})
-		})
-	}
-	err = ensure()
+	err = p.ensureShadow(ctx, job, target)
 	var mismatch *chsink.SchemaMismatchError
 	if errors.As(err, &mismatch) {
 		// The table was changed while the service was down: what was read is in the old structure. The
-		// shadow table is dropped first, by its identity, then made again. A drop that fails leaves the
-		// entry as it was saved.
+		// shadow table is dropped by its UUID first, then made again with a new one, saved before. A drop
+		// that fails leaves the entry as it was saved, with the UUID of the table that is still there.
 		p.log.Warn("resync restarted: table changed while stopped", "table", st.Table)
 		if _, err := p.dropShadow(ctx, st); err != nil {
 			return fmt.Errorf("resync %s: the shadow table of the old structure: %w", st.Table, err)
 		}
 		readFromStart(&job.state)
 		job.state.Restarts = st.Restarts + 1
+		job.state.ShadowUUID = p.d.NewUUID()
 		if err := p.saveResumed(ctx, job.state); err != nil {
 			return err
 		}
-		err = ensure()
+		target.UUID = job.state.ShadowUUID
+		err = p.ensureShadow(ctx, job, target)
 	}
 	if err != nil {
 		return fmt.Errorf("resync %s: %w", st.Table, err)
@@ -561,6 +566,29 @@ func (p *Pipeline) resumeResync(ctx context.Context, st checkpoint.Resync) error
 	}
 	p.log.Debug("resync continues after a restart", "table", st.Table, "rows_read", job.state.Rows)
 	return nil
+}
+
+// ensureShadow makes, or takes, the shadow table of a resync a restart continues. A UUID ClickHouse holds
+// already is not given to it (the shadow table made with it was dropped before anything read into it was
+// saved, and ClickHouse keeps the UUID of a dropped table for a while): it gets a new one, saved before
+// the table is made.
+func (p *Pipeline) ensureShadow(ctx context.Context, job *resyncJob, target *chsink.Table) error {
+	ensure := func() error {
+		return p.withRetry(ctx, "prepare the shadow table "+target.Name, func(actx context.Context) error {
+			return p.d.Sink.Ensure(actx, target, chsink.DDL{Mode: p.cfg.DDL.Mode})
+		})
+	}
+	err := ensure()
+	if !errors.Is(err, chsink.ErrUUIDTaken) {
+		return err
+	}
+	p.log.Warn("shadow table made with a new UUID: ClickHouse holds the saved one", "table", job.state.Table, "uuid", target.UUID)
+	job.state.ShadowUUID = p.d.NewUUID()
+	if err := p.saveResumed(ctx, job.state); err != nil {
+		return err
+	}
+	target.UUID = job.state.ShadowUUID
+	return ensure()
 }
 
 // saveResumed saves the position with a resync that a restart makes read the table again, before its
@@ -643,7 +671,7 @@ func (p *Pipeline) tablesToLoad(ctx context.Context, since string) ([]checkpoint
 			continue
 		}
 		entries = append(entries, checkpoint.Resync{
-			Table: t.FullName(), Shadow: shadow, Since: since, Started: now, InitialLoad: true,
+			Table: t.FullName(), Shadow: shadow, ShadowUUID: p.d.NewUUID(), Since: since, Started: now, InitialLoad: true,
 			Estimate: t.EstimatedRows,
 		})
 	}
@@ -694,13 +722,13 @@ func (p *Pipeline) tableDefinition(ctx context.Context, database, table string) 
 	return def, err
 }
 
-// shadowTable resolves the shadow table of a resync from the definition that is read.
-func (p *Pipeline) shadowTable(def *schema.Table, shadow string) (*chsink.Table, error) {
+// shadowTable resolves the shadow table of a resync from the definition that is read, made with the UUID.
+func (p *Pipeline) shadowTable(def *schema.Table, shadow, uuid string) (*chsink.Table, error) {
 	t, err := chsink.Resolve(def, p.cfg, p.d.Reporter)
 	if err != nil {
 		return nil, fmt.Errorf("resync %s: %w", def.FullName(), err)
 	}
-	t.Name, t.Comment = shadow, chsink.ResyncMarker(t.Name)
+	t.Name, t.Comment, t.UUID = shadow, chsink.ResyncMarker(t.Name), uuid
 	return t, nil
 }
 
@@ -714,15 +742,15 @@ func (p *Pipeline) shape(ctx context.Context, database, table string) (chsink.Ta
 	return shape, err
 }
 
-// dropShadow drops the shadow table of a resync, if it is binwave's (by its identity,
-// chsink.Client.DropShadow): a table that took its name is not touched. dropped is false when there was
-// none of binwave's.
+// dropShadow drops the shadow table of a resync, if it is binwave's (by its identity, the UUID the resync
+// made it with, chsink.Client.DropShadow): a table that took its name is not touched. dropped is false
+// when there was none of binwave's.
 func (p *Pipeline) dropShadow(ctx context.Context, st checkpoint.Resync) (dropped bool, err error) {
 	name, shadow := st.Table, st.Shadow
 	db, table, _ := cutQualified(name)
 	tdb, ttable := chsink.TargetName(p.cfg, db, table)
 	err = p.withRetry(ctx, "drop the shadow table "+shadow, func(actx context.Context) error {
-		dropped, err = p.d.Sink.DropShadow(actx, chsink.SwapRequest{Source: name, Database: tdb, Table: ttable, Shadow: shadow})
+		dropped, err = p.d.Sink.DropShadow(actx, chsink.SwapRequest{Source: name, Database: tdb, Table: ttable, Shadow: shadow, ShadowUUID: st.ShadowUUID})
 		return err
 	})
 	if err != nil {
@@ -774,11 +802,12 @@ func (p *Pipeline) holdResync(name string, code errcode.Code, err error) error {
 }
 
 // registerPending keeps a resync that has to begin again in the position, as one that has to: a
-// restart begins it then, and until it begins its table is written as it is.
-func (p *Pipeline) registerPending(j restartJob) {
+// restart begins it then, and until it begins its table is written as it is. uuid is that of the
+// shadow table that may be under its name, which is the resync's to drop when it begins again.
+func (p *Pipeline) registerPending(j restartJob, uuid string) {
 	db, table, _ := cutQualified(j.name)
 	st := checkpoint.Resync{
-		Table: j.name, Shadow: chsink.ShadowName(p.cfg, db, table), Version: p.versions.Last(), Since: p.committed.GTIDSet,
+		Table: j.name, Shadow: chsink.ShadowName(p.cfg, db, table), ShadowUUID: uuid, Version: p.versions.Last(), Since: p.committed.GTIDSet,
 		Quarantined: j.quarantined, Restarts: j.restarts, Started: p.d.Now(),
 		InitialLoad: j.origin.initialLoad, Autoresync: j.origin.autoresync, Pending: true,
 	}
@@ -789,9 +818,18 @@ func (p *Pipeline) registerPending(j restartJob) {
 	p.syncResyncs()
 }
 
-// holdPending keeps a resync that has to begin again in the position, and stops replication on it.
+// pendingUUID is the UUID the entry of a resync that has to begin again has: registered, or being resumed.
+func (p *Pipeline) pendingUUID(name string) string {
+	if job, ok := p.resyncs[name]; ok {
+		return job.state.ShadowUUID
+	}
+	return p.resumeLeft[name].ShadowUUID
+}
+
+// holdPending keeps a resync that has to begin again in the position, and stops replication on it. Its
+// entry keeps the UUID it has: the shadow table may have been made with it.
 func (p *Pipeline) holdPending(j restartJob, err error) error {
-	p.registerPending(j)
+	p.registerPending(j, p.pendingUUID(j.name))
 	return p.holdResync(j.name, errcode.SYNC101, fmt.Errorf("could not begin again after a DDL statement: %w", err))
 }
 
@@ -1248,6 +1286,10 @@ type resyncOrigin struct {
 // one table of the initial load (origin.initialLoad true, launched once fillLoadSlots gives it a
 // slot: the only origin held to replication.snapshot.parallelism, since it is the only one that can
 // mean hundreds of tables at once). Its definition is what the snapshot reads with.
+//
+// The shadow table is made with a new UUID. A resync that begins again (its pending entry registered, or
+// being resumed) has it in its entry, saved by the flush below before the table is made: no table of the
+// UUID the entry had is under the name then.
 func (p *Pipeline) startResync(ctx context.Context, name string, def *schema.Table, quarantined string, restarts int, origin resyncOrigin) error {
 	if job, active := p.resyncs[name]; active && !job.state.Pending {
 		return fmt.Errorf("%s is being resynchronized already", name)
@@ -1300,7 +1342,16 @@ func (p *Pipeline) startResync(ctx context.Context, name string, def *schema.Tab
 		return &chsink.ConflictError{Err: fmt.Errorf("the table %s.%s carries the marker of a resync whose swap was not finished; "+
 			"remove it (ALTER TABLE ... MODIFY COMMENT '') once the table is the one to keep, and start the resync again", tdb, ttable)}
 	}
-	target, err := p.shadowTable(def, shadow)
+	uuid := p.d.NewUUID()
+	if job, ok := p.resyncs[name]; ok {
+		job.state.ShadowUUID = uuid // pending
+	}
+	if st, ok := p.resumeLeft[name]; ok {
+		st.ShadowUUID = uuid
+		p.resumeLeft[name] = st
+	}
+	p.syncResyncs()
+	target, err := p.shadowTable(def, shadow, uuid)
 	if err != nil {
 		return err
 	}
@@ -1322,7 +1373,7 @@ func (p *Pipeline) startResync(ctx context.Context, name string, def *schema.Tab
 	}
 	job := &resyncJob{
 		state: checkpoint.Resync{
-			Table: name, Shadow: shadow, Version: p.versions.Last(), Since: p.committed.GTIDSet,
+			Table: name, Shadow: shadow, ShadowUUID: uuid, Version: p.versions.Last(), Since: p.committed.GTIDSet,
 			Quarantined: quarantined, Restarts: restarts, Started: p.d.Now(),
 			InitialLoad: origin.initialLoad, Autoresync: origin.autoresync,
 		},
@@ -1435,7 +1486,7 @@ func (p *Pipeline) swapRequest(job *resyncJob) chsink.SwapRequest {
 	name := job.state.Table
 	db, table, _ := cutQualified(name)
 	tdb, ttable := chsink.TargetName(p.cfg, db, table)
-	return chsink.SwapRequest{Source: name, Database: tdb, Table: ttable, Shadow: job.state.Shadow}
+	return chsink.SwapRequest{Source: name, Database: tdb, Table: ttable, Shadow: job.state.Shadow, ShadowUUID: job.state.ShadowUUID}
 }
 
 // swapMarks reads which of the table and the shadow table of a job carries its marker.
@@ -1672,8 +1723,13 @@ func (p *Pipeline) interruptResyncs(ctx context.Context, e event.DDL, impacts []
 		}
 		p.restarting = append(p.restarting, j)
 		// Saved as one that has to begin again until it does: a position saved before that (the statement
-		// itself, the flush the new resync begins with) must not forget it.
-		p.registerPending(j)
+		// itself, the flush the new resync begins with) must not forget it. Its entry keeps the UUID of
+		// the shadow table, which is still there if it could not be dropped.
+		uuid := state.ShadowUUID
+		if im.table != state.Table {
+			uuid = p.d.NewUUID() // the renamed table, which has no shadow table
+		}
+		p.registerPending(j, uuid)
 	}
 }
 
@@ -1724,9 +1780,10 @@ func (p *Pipeline) beginPending(ctx context.Context, st checkpoint.Resync) error
 		origin: resyncOrigin{initialLoad: st.InitialLoad, autoresync: st.Autoresync},
 	}
 	db, table, _ := cutQualified(st.Table)
-	// A crash after the resync began again, before a position said so, leaves its shadow table: it is
-	// binwave's (the marker says so) and holds nothing that is kept, since the read begins from the start.
-	// A drop that fails leaves the entry as it was saved.
+	// A crash after the resync began again, before a position said so, leaves its shadow table, made with
+	// the UUID saved here (or one a drop that failed left): it is binwave's, and holds nothing that is
+	// kept, since the read begins from the start. In a state saved without the UUID (an earlier release)
+	// the marker tells. A drop that fails leaves the entry as it was saved.
 	dropped, err := p.dropShadow(ctx, st)
 	if err != nil {
 		return fmt.Errorf("begin the resync of %s again: %w", st.Table, err)

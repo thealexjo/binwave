@@ -129,9 +129,12 @@ type Deps struct {
 	// restarting, the network is down) from one that does not; nil takes every failure for the latter.
 	SourceTransient func(error) bool
 
-	// Now and Sleep are injectable so tests are deterministic.
-	Now   func() time.Time
-	Sleep func(ctx context.Context, d time.Duration) error
+	// Now, Sleep and NewUUID (the UUID a shadow table is made with) are injectable so tests are
+	// deterministic.
+	Now     func() time.Time
+	Sleep   func(ctx context.Context, d time.Duration) error
+	NewUUID func() string
+
 	Retry RetryPolicy
 }
 
@@ -273,6 +276,9 @@ func New(cfg *config.Config, d Deps) (*Pipeline, error) {
 	}
 	if p.d.Now == nil {
 		p.d.Now = time.Now
+	}
+	if p.d.NewUUID == nil {
+		p.d.NewUUID = randomUUID
 	}
 	if p.d.Sleep == nil {
 		p.d.Sleep = p.sleepWithProgress
@@ -668,7 +674,7 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 	job, resyncing := p.resyncs[name]
 	if resyncing && !job.state.Pending { // a pending one has no shadow table until it begins again
 		// The table is being resynchronized: its changes go to the shadow table, which replaces it.
-		t.Name, t.Comment = job.state.Shadow, chsink.ResyncMarker(t.Name)
+		t.Name, t.Comment, t.UUID = job.state.Shadow, chsink.ResyncMarker(t.Name), job.state.ShadowUUID
 	}
 	// The target is one database, so tables of the same name in different source databases would
 	// share a ClickHouse table and overwrite each other's rows without any error.

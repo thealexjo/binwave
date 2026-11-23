@@ -269,9 +269,9 @@ func TestASwapLosesNothingWhateverHappensAroundIt(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 	runs := 0
 	for _, known := range []bool{false, true} {
-		// The UUID of the copy known (the copy a rebuild made or reused) or not (a resync); and the table put
-		// under the name of the copy carrying the marker of the job, a copy of its comment, which only the
-		// UUID tells from the copy.
+		// The UUID of the copy known (the copy a rebuild made or reused, the shadow table a resync saved the
+		// UUID of) or not (a resync saved before it was kept); and the table put under the name of the copy
+		// carrying the marker of the job, a copy of its comment, which only the UUID tells from the copy.
 		for _, marked := range []bool{false, true} {
 			if marked && !known {
 				continue

@@ -22,6 +22,10 @@ type Resync struct {
 	Table string `json:"table"`
 	// Shadow is the name of the ClickHouse table that is filled, in the database of the table.
 	Shadow string `json:"shadow"`
+	// ShadowUUID is the UUID binwave makes the shadow table with, saved before the table is made (or with
+	// the resync that made it): only a table of that UUID is the shadow table. A shadow table made again
+	// gets a new one. Empty in state written before it was kept, where the marker alone tells.
+	ShadowUUID string `json:"shadow_uuid,omitempty"`
 	// Version is the row version of the snapshot: that of the last transaction before the shadow
 	// table began to receive the changes of the table. Every change that reaches the shadow table
 	// has a higher version, so it wins over the row the snapshot read, whatever the order.

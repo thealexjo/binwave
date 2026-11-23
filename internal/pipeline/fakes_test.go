@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -282,6 +284,16 @@ type fakeSink struct {
 	insertErrsByTarget map[string]error
 	// shapes answers Shape by "database.table"; a table that is not there does not exist.
 	shapes map[string]chsink.TableShape
+	// uuids are the UUIDs of the tables, by "database.table": a table made with one (Ensure of a Table with
+	// a UUID) has it, and the swap moves it with the table; a table of a job that has one is taken only with
+	// it. One that is not here is not known.
+	uuids map[string]string
+	// held are the UUIDs of tables that were dropped, which ClickHouse keeps a while: a table is not made
+	// with one (nor with one a table has); taken counts the Ensures refused so.
+	held  map[string]bool
+	taken int
+	// dropErr fails every DropShadow that has a table of binwave's to drop, leaving it.
+	dropErr error
 	// accessErr fails CheckAccess.
 	accessErr error
 	// rebuildErr fails the rebuild.
@@ -339,11 +351,15 @@ func (s *fakeSink) Ensure(_ context.Context, t *chsink.Table, ddl chsink.DDL) er
 		}
 	}
 	if name := t.Database + "." + t.Name; strings.HasPrefix(t.Comment, "binwave: ") && s.shapes[name].Exists &&
-		s.foreign[name] {
+		(s.foreign[name] || s.uuids[name] != "" && s.uuids[name] != t.UUID) {
 		return &chsink.ConflictError{Err: errors.New("the table is not the one binwave made")}
 	}
 	if ddl.Existing && !s.shapes[t.Database+"."+t.Name].Exists {
 		return &chsink.TableError{Table: t.Source.FullName(), Recoverable: true, Err: errors.New("the table is gone")}
+	}
+	if name := t.Database + "." + t.Name; t.UUID != "" && !s.shapes[name].Exists && (s.held[t.UUID] || slices.Contains(slices.Collect(maps.Values(s.uuids)), t.UUID)) {
+		s.taken++
+		return fmt.Errorf("create table %s: %w", name, chsink.ErrUUIDTaken)
 	}
 	if strings.HasPrefix(t.Comment, "binwave: resync shadow") {
 		// A shadow table made: there for Shape and SwapMarks, as binwave's.
@@ -352,6 +368,12 @@ func (s *fakeSink) Ensure(_ context.Context, t *chsink.Table, ddl chsink.DDL) er
 		}
 		if name := t.Database + "." + t.Name; !s.shapes[name].Exists {
 			s.shapes[name] = chsink.TableShape{Exists: true}
+			if t.UUID != "" {
+				if s.uuids == nil {
+					s.uuids = map[string]string{}
+				}
+				s.uuids[name] = t.UUID
+			}
 		}
 	}
 	if s.onEnsure != nil {
@@ -432,7 +454,16 @@ func (s *fakeSink) SwapShadow(_ context.Context, req chsink.SwapRequest) (string
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	copied := "uuid:" + req.Database + "." + req.Shadow
+	table, shadow := req.Database+"."+req.Table, req.Database+"."+req.Shadow
+	copied := "uuid:" + shadow
+	if u := s.uuids[shadow]; u != "" {
+		copied = u
+	}
+	if req.ShadowUUID != "" && s.uuids[table] == req.ShadowUUID && !s.marked[table] {
+		// The table is the shadow table, by its UUID, and unmarked: the swap was finished before.
+		s.journal.add("swap-finished-before %s", table)
+		return req.ShadowUUID, nil
+	}
 	if f := s.swapFails; f != nil {
 		s.swapFails = nil
 		s.journal.add("swap-failed %s.%s", req.Database, req.Table)
@@ -456,6 +487,10 @@ func (s *fakeSink) SwapShadow(_ context.Context, req chsink.SwapRequest) (string
 	s.tables[req.Database+"."+req.Table] = s.tables[req.Database+"."+req.Shadow]
 	delete(s.tables, req.Database+"."+req.Shadow)
 	delete(s.shapes, req.Database+"."+req.Shadow)
+	if u, ok := s.uuids[shadow]; ok {
+		s.uuids[table] = u
+		delete(s.uuids, shadow)
+	}
 	return copied, nil
 }
 
@@ -465,10 +500,12 @@ func (s *fakeSink) SwapMarks(_ context.Context, req chsink.SwapRequest) (chsink.
 	defer s.mu.Unlock()
 	shadow := req.Database + "." + req.Shadow
 	exists := s.shapes[shadow].Exists || s.marked[shadow] || s.foreign[shadow]
+	other := req.ShadowUUID != "" && s.uuids[shadow] != "" && s.uuids[shadow] != req.ShadowUUID
 	return chsink.SwapMarks{
 		Table:        s.marked[req.Database+"."+req.Table],
-		Shadow:       s.marked[shadow] || (exists && !s.foreign[shadow]),
+		Shadow:       !other && (s.marked[shadow] || (exists && !s.foreign[shadow])),
 		ShadowExists: exists,
+		Swapped:      req.ShadowUUID != "" && s.uuids[req.Database+"."+req.Table] == req.ShadowUUID,
 	}, nil
 }
 
@@ -478,9 +515,20 @@ func (s *fakeSink) DropShadow(_ context.Context, req chsink.SwapRequest) (bool, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	shadow := req.Database + "." + req.Shadow
-	if s.foreign[shadow] || (!s.marked[shadow] && !s.shapes[shadow].Exists) {
+	other := req.ShadowUUID != "" && s.uuids[shadow] != "" && s.uuids[shadow] != req.ShadowUUID
+	if s.foreign[shadow] || other || (!s.marked[shadow] && !s.shapes[shadow].Exists) {
 		return false, nil
 	}
+	if s.dropErr != nil {
+		return false, s.dropErr
+	}
+	if u := s.uuids[shadow]; u != "" {
+		if s.held == nil {
+			s.held = map[string]bool{}
+		}
+		s.held[u] = true
+	}
+	delete(s.uuids, shadow)
 	s.drops = append(s.drops, chsink.DropRequest{Source: req.Shadow, Database: req.Database, Table: req.Shadow})
 	s.journal.add("drop %s", shadow)
 	delete(s.shapes, shadow)
@@ -690,6 +738,7 @@ func (h *harness) pipeline(t testing.TB) *Pipeline {
 		Snapshot:        h.snapshot,
 		Retry:           h.retry,
 		Now:             h.clock.Now,
+		NewUUID:         h.newUUID,
 		SourceTransient: h.sourceTransient,
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			h.sleeps = append(h.sleeps, d)
@@ -701,6 +750,14 @@ func (h *harness) pipeline(t testing.TB) *Pipeline {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// uuidN numbers the UUIDs of the shadow tables over every harness: a restart (a harness made from the
+// position of another) never makes one a crashed process made.
+var uuidN atomic.Int64
+
+func (h *harness) newUUID() string {
+	return fmt.Sprintf("00000000-0000-4000-8000-%012d", uuidN.Add(1))
 }
 
 func (h *harness) hooks() Hooks {

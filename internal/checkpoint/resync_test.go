@@ -102,6 +102,26 @@ func TestResyncStateWrittenBeforeTheGTIDPoolIsStillRead(t *testing.T) {
 	}
 }
 
+// TestTheUUIDOfAShadowTableIsSavedWithItsResync: the UUID a resync made its shadow table with comes back
+// from the saved state; a state saved without it (an earlier release) reads none.
+func TestTheUUIDOfAShadowTableIsSavedWithItsResync(t *testing.T) {
+	entry := Resync{Table: "shop.items", Shadow: "items__resync", ShadowUUID: "0a000000-0000-4000-8000-00000000000a", Version: 7, Since: "u:1-9"}
+	text := EncodeResyncs([]Resync{entry})
+	if !strings.Contains(text, `"shadow_uuid":"0a000000-0000-4000-8000-00000000000a"`) {
+		t.Errorf("the saved state %s does not have the UUID", text)
+	}
+	got, err := DecodeResyncs(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ShadowUUID != entry.ShadowUUID {
+		t.Errorf("read %+v, want the UUID %s", got, entry.ShadowUUID)
+	}
+	if text := EncodeResyncs([]Resync{{Table: "shop.items", Shadow: "items__resync"}}); strings.Contains(text, "shadow_uuid") {
+		t.Errorf("a state without the UUID is saved as %s", text)
+	}
+}
+
 func TestResyncStateWithABrokenGTIDReferenceIsAnError(t *testing.T) {
 	if _, err := DecodeResyncs(`{"gtids":["u:1-9"],"resyncs":[{"table":"a.b","since":"#4"}]}`); err == nil {
 		t.Error("a reference past the end of the pool was accepted: the resync would resume at an empty position")

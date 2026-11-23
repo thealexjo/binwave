@@ -222,6 +222,114 @@ func TestEnsureTakesATableOfAJobOnlyWhenItIsTheOneBinwaveMade(t *testing.T) {
 	}
 }
 
+// TestAShadowTableIsKnownByTheUUIDItWasMadeWith: the shadow table of a resync is made with the UUID the
+// resync gives it, and only a table of that UUID is it: one with its marker and another UUID is not taken,
+// swapped in or dropped. The shadow table in the place of the table without the marker is a swap that was
+// finished. ClickHouse refuses a table made with a UUID it holds: one a table has, or had and was dropped.
+func TestAShadowTableIsKnownByTheUUIDItWasMadeWith(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	sink := openSink(t, ch)
+	ctx := context.Background()
+	const mine, other, later = "0a000000-0000-4000-8000-00000000000a", "0b000000-0000-4000-8000-00000000000b", "0c000000-0000-4000-8000-00000000000c"
+	table := resolveTable(t, kvTable(), nil)
+	if err := sink.Ensure(ctx, table, additive); err != nil {
+		t.Fatal(err)
+	}
+	insertKV(t, sink, table, kvRows(event.Insert, nil, []any{int32(1), "old"}), 10)
+	shadow := resolveTable(t, kvTable(), nil)
+	shadow.Name, shadow.Comment, shadow.UUID = "kv__resync", chsink.ResyncMarker("kv"), mine
+	if err := sink.Ensure(ctx, shadow, additive); err != nil {
+		t.Fatal(err)
+	}
+	if got := tableUUID(t, ch, "replica", "kv__resync"); got != mine {
+		t.Fatalf("the shadow table was made with the UUID %s, want %s", got, mine)
+	}
+	insertKV(t, sink, shadow, kvRows(event.Insert, nil, []any{int32(1), "new"}), 20)
+	value := func(table string) string {
+		t.Helper()
+		rows := readTable(t, ch, table, "k")
+		if len(rows) != 1 {
+			t.Fatalf("%s holds %v", table, rows)
+		}
+		return fmt.Sprint(rows[0]["v"])
+	}
+
+	theirs := *shadow
+	theirs.UUID = other
+	for _, ddl := range []chsink.DDL{additive, {Mode: additive.Mode, Existing: true}} {
+		if err := sink.Ensure(ctx, shadow, ddl); err != nil {
+			t.Errorf("existing %v: Ensure() with the UUID of the shadow table = %v", ddl.Existing, err)
+		}
+		if err := sink.Ensure(ctx, &theirs, ddl); !chsink.IsConflict(err) {
+			t.Errorf("existing %v: Ensure() with another UUID = %v, want a conflict", ddl.Existing, err)
+		}
+	}
+	req := chsink.SwapRequest{Source: "shop.kv", Database: "replica", Table: "kv", Shadow: "kv__resync", ShadowUUID: other}
+	if got, err := sink.SwapMarks(ctx, req); err != nil || got != (chsink.SwapMarks{ShadowExists: true}) {
+		t.Errorf("SwapMarks() with another UUID = %+v, %v, want a table there that is not the shadow table", got, err)
+	}
+	if dropped, err := sink.DropShadow(ctx, req); err != nil || dropped {
+		t.Errorf("DropShadow() with another UUID = %v, %v, want nothing dropped", dropped, err)
+	}
+	if _, err := sink.SwapShadow(ctx, req); !chsink.IsConflict(err) {
+		t.Errorf("SwapShadow() with another UUID = %v, want a conflict", err)
+	}
+	if got := tableUUID(t, ch, "replica", "kv__resync"); got != mine || value("kv") != "old" || value("kv__resync") != "new" {
+		t.Fatalf("the tables changed: the shadow table has the UUID %s", got)
+	}
+
+	twin := *shadow
+	twin.Name, twin.Comment = "kv2__resync", chsink.ResyncMarker("kv2")
+	if err := sink.Ensure(ctx, &twin, additive); !errors.Is(err, chsink.ErrUUIDTaken) {
+		t.Errorf("Ensure() with the UUID a table has = %v, want ErrUUIDTaken", err)
+	}
+
+	// The swap, and its repeat by a restart that knows nothing of it but the UUID.
+	req.ShadowUUID = mine
+	if got, err := sink.SwapMarks(ctx, req); err != nil || got != (chsink.SwapMarks{Shadow: true, ShadowExists: true}) {
+		t.Errorf("SwapMarks() before the swap = %+v, %v", got, err)
+	}
+	if copied, err := sink.SwapShadow(ctx, req); err != nil || copied != mine {
+		t.Fatalf("SwapShadow() = %q, %v, want %s", copied, err, mine)
+	}
+	for range 2 {
+		if got, err := sink.SwapMarks(ctx, req); err != nil || got != (chsink.SwapMarks{Swapped: true}) {
+			t.Errorf("SwapMarks() after the swap = %+v, %v, want the swap finished", got, err)
+		}
+		if copied, err := sink.SwapShadow(ctx, req); err != nil || copied != mine {
+			t.Errorf("SwapShadow() again = %q, %v, want the swap finished", copied, err)
+		}
+	}
+	legacy := req
+	legacy.ShadowUUID = ""
+	var lost *chsink.TableError
+	if _, err := sink.SwapShadow(ctx, legacy); !errors.As(err, &lost) {
+		t.Errorf("SwapShadow() without the UUID = %v, want the shadow table lost (nothing tells the swap finished)", err)
+	}
+	if got := tableUUID(t, ch, "replica", "kv"); got != mine || value("kv") != "new" {
+		t.Errorf("after the swap the table has the UUID %s and %q, want %s and new", got, value("kv"), mine)
+	}
+
+	// Dropped, a shadow table leaves its UUID held.
+	again := *shadow
+	again.UUID = later
+	if err := sink.Ensure(ctx, &again, additive); err != nil {
+		t.Fatal(err)
+	}
+	req.ShadowUUID = later
+	if dropped, err := sink.DropShadow(ctx, req); err != nil || !dropped {
+		t.Fatalf("DropShadow() = %v, %v, want the shadow table dropped", dropped, err)
+	}
+	if err := sink.Ensure(ctx, &again, additive); !errors.Is(err, chsink.ErrUUIDTaken) {
+		t.Errorf("Ensure() with the UUID of the dropped shadow table = %v, want ErrUUIDTaken", err)
+	}
+	var n uint64
+	if err := ch.DB.QueryRow("SELECT count() FROM system.tables WHERE database = 'replica' AND name LIKE '%resync%'").Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d tables under the name of a shadow table (%v), want none", n, err)
+	}
+}
+
 func TestEnsureReportsAMismatchAndLeavesTheTableAlone(t *testing.T) {
 	t.Parallel()
 	ch := testenv.StartClickHouse(t)

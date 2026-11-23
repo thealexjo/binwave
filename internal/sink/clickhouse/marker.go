@@ -133,6 +133,13 @@ func isCopy(t swapTable, marker, uuid string) bool {
 	return ownMarker(t, marker) && (uuid == "" || t.uuid == uuid)
 }
 
+func uuidOrAny(uuid string) string {
+	if uuid == "" {
+		return "any"
+	}
+	return uuid
+}
+
 // isMarker reports whether comment is the marker, with or without the UUID of the replaced table. A
 // marker of an earlier release names no table, and is taken for the marker of any.
 func isMarker(comment, want string) bool {

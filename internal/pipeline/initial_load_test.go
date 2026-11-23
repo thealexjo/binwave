@@ -166,7 +166,7 @@ func TestFillLoadSlotsRespectsParallelism(t *testing.T) {
 	for _, name := range []string{"shop.a", "shop.b", "shop.c", "shop.d"} {
 		def := itemsTable()
 		def.Name = name[len("shop."):]
-		target, err := p.shadowTable(def, def.Name+"__resync")
+		target, err := p.shadowTable(def, def.Name+"__resync", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,7 +221,7 @@ func TestATablesResyncIsNotHeldUpBehindTheInitialLoad(t *testing.T) {
 
 	loading := itemsTable()
 	loading.Name = "loading"
-	target, err := p.shadowTable(loading, "loading__resync")
+	target, err := p.shadowTable(loading, "loading__resync", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestInitialLoadThatGivesUpIsQuarantinedLikeAResync(t *testing.T) {
 	p := h.pipeline(t)
 	p.q.setSince(fence(0))
 
-	target, err := p.shadowTable(itemsTable(), "items__resync")
+	target, err := p.shadowTable(itemsTable(), "items__resync", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +598,7 @@ func TestProgressIsReportedPerChunkNotPerEvent(t *testing.T) {
 	p.versions = chsink.NewVersioner(0)
 	p.q.setSince(fence(0))
 
-	target, err := p.shadowTable(itemsTable(), "items__resync")
+	target, err := p.shadowTable(itemsTable(), "items__resync", "")
 	if err != nil {
 		t.Fatal(err)
 	}

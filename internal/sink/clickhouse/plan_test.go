@@ -56,11 +56,12 @@ func TestCreateStatementGolden(t *testing.T) {
 	}
 
 	tests := []struct {
-		name  string
-		table *schema.Table
-		cfg   *config.Config
+		name   string
+		table  *schema.Table
+		cfg    *config.Config
+		shadow string // the UUID of a shadow table made with one
 	}{
-		{"orders", ordersTable(), cfgWith(nil)},
+		{"orders", ordersTable(), cfgWith(nil), ""},
 		{"orders_overrides", ordersTable(), cfgWith(map[string]config.TableOverride{
 			"shop.orders": {
 				TargetTable:    "orders_v2",
@@ -70,18 +71,22 @@ func TestCreateStatementGolden(t *testing.T) {
 					"status": {Type: "Enum8('new' = 1, 'paid' = 2)"},
 				},
 			},
-		})},
-		{"composite_key", compositeKey, cfgWith(nil)},
+		}), ""},
+		{"composite_key", compositeKey, cfgWith(nil), ""},
+		{"shadow_table", ordersTable(), cfgWith(nil), "0a000000-0000-4000-8000-00000000000a"},
 		{"quoted_identifiers", odd, &config.Config{Tables: config.Tables{
 			TargetDatabase: "we`ird",
 			Overrides:      map[string]config.TableOverride{"we`ird.ta`ble": {OrderBy: []string{"co l"}}},
-		}}},
+		}}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tbl, err := Resolve(tt.table, tt.cfg, nil)
 			if err != nil {
 				t.Fatalf("Resolve() = %v", err)
+			}
+			if tt.shadow != "" {
+				tbl.Name, tbl.Comment, tbl.UUID = "orders__resync", ResyncMarker(tbl.Name), tt.shadow
 			}
 			got := tbl.CreateStatement() + "\n"
 

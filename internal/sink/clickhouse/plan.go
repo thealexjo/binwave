@@ -45,6 +45,9 @@ type Table struct {
 	// Comment is put on the table when it is created; the shadow table of a resync carries a marker
 	// there (see ResyncMarker), and after the swap it is on the table that took its place.
 	Comment string
+	// UUID, when set, is the UUID of the table: it is created with it, and a table binwave keeps for a job
+	// is taken only with it.
+	UUID string
 
 	orderIdx []int // indexes into Source.Columns, for detecting key changes
 }
@@ -213,7 +216,11 @@ func (t *Table) expectedColumns() [][2]string {
 // CreateStatement renders CREATE TABLE IF NOT EXISTS for the table. It never drops or recreates anything.
 func (t *Table) CreateStatement() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE IF NOT EXISTS %s\n(\n", t.FullName())
+	fmt.Fprintf(&b, "CREATE TABLE IF NOT EXISTS %s", t.FullName())
+	if t.UUID != "" {
+		fmt.Fprintf(&b, " UUID %s", stringLiteral(t.UUID))
+	}
+	b.WriteString("\n(\n")
 	cols := t.expectedColumns()
 	comments := map[string]string{}
 	for _, c := range t.Columns {

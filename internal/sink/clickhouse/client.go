@@ -132,6 +132,10 @@ func (e *SchemaMismatchError) Error() string {
 	return fmt.Sprintf("clickhouse table %s does not match the source:\n  - %s", e.Table, strings.Join(e.Problems, "\n  - "))
 }
 
+// ErrUUIDTaken is the error of a table made with a UUID that ClickHouse holds already: a table has it, or
+// had it and was dropped (ClickHouse keeps the UUID of a dropped table for a while).
+var ErrUUIDTaken = errors.New("the UUID is held by ClickHouse already")
+
 // Ensure makes the ClickHouse table ready for inserts: it creates the database and table when
 // they do not exist, then verifies that the table matches. It never drops, truncates or
 // recreates anything on its own. With ddl.dry_run nothing is created: what would be executed
@@ -163,6 +167,10 @@ func (c *Client) Ensure(ctx context.Context, t *Table, ddl DDL) error {
 			}
 			err = c.conn.Exec(ctx, createTable)
 		}
+		if t.UUID != "" && isCode(err, tableExistsCode) {
+			// Under IF NOT EXISTS a table that has the name is no error: what is taken is the UUID.
+			return fmt.Errorf("create table %s with the UUID %s: %w (%w)", t.FullName(), t.UUID, ErrUUIDTaken, err)
+		}
 		if err != nil {
 			return fmt.Errorf("create table %s: %w", t.FullName(), err)
 		}
@@ -170,14 +178,15 @@ func (c *Client) Ensure(ctx context.Context, t *Table, ddl DDL) error {
 		return err
 	}
 	if _, job := parseMarker(t.Comment); job {
-		// A table binwave keeps for a job is written to only while it is the one binwave made: its marker.
+		// A table binwave keeps for a job is written to only while it is the one binwave made: its marker,
+		// and its UUID when the job knows it.
 		got, err := clientOps{c}.read(ctx, t.Database, t.Name)
 		if err != nil {
 			return err
 		}
-		if !ownMarker(got[t.Name], t.Comment) {
+		if !isCopy(got[t.Name], t.Comment, t.UUID) {
 			return &ConflictError{Err: fmt.Errorf("ClickHouse has the table %s, which is not the one binwave made for the resync of %s "+
-				"(the marker %q); nothing is written to it, rename or drop it in ClickHouse and resume", t.FullName(), t.Source.FullName(), t.Comment)}
+				"(the marker %q, the UUID %s); nothing is written to it, rename or drop it in ClickHouse and resume", t.FullName(), t.Source.FullName(), t.Comment, uuidOrAny(t.UUID))}
 		}
 	}
 	if err := c.verify(ctx, t); err != nil {
@@ -314,10 +323,17 @@ func (c *Client) columns(ctx context.Context, database, table string) (map[strin
 	return cols, nil
 }
 
+const tableExistsCode = 57 // TABLE_ALREADY_EXISTS
+
+// isCode reports whether ClickHouse refused a statement with the exception of the code.
+func isCode(err error, code int32) bool {
+	var exception *ch.Exception
+	return errors.As(err, &exception) && exception.Code == code
+}
+
 // isUnknownDatabase reports whether ClickHouse refused a statement because its database does not exist.
 func isUnknownDatabase(err error) bool {
-	var exception *ch.Exception
-	return errors.As(err, &exception) && exception.Code == 81 // UNKNOWN_DATABASE
+	return isCode(err, 81) // UNKNOWN_DATABASE
 }
 
 // binwaveEngine is the engine of every table binwave writes, with the arguments FINAL depends on.

@@ -15,6 +15,9 @@ type SwapRequest struct {
 	// (what SwapShadow returned): only a table of that UUID in the place of the table, without the marker,
 	// is a swap that was finished.
 	Copy string
+	// ShadowUUID is the UUID the resync made its shadow table with (empty in a resync saved before it was
+	// kept): only a table of that UUID is the shadow table.
+	ShadowUUID string
 }
 
 // tableComment reads the comment of a table, empty for a table that is not there.
@@ -35,7 +38,7 @@ func (c *Client) SwapShadow(ctx context.Context, req SwapRequest) (copied string
 	shadow := quote(req.Database) + "." + quote(req.Shadow)
 	copied, outcome, err := swapCopy(ctx, clientOps{c}, c.log, swapSpec{
 		database: req.Database, table: req.Table, copy: req.Shadow, marker: ResyncMarker(req.Table),
-		copied: req.Copy,
+		copied: req.Copy, copyUUID: req.ShadowUUID,
 	})
 	if err != nil {
 		return copied, c.classifyResync(req, err)
@@ -63,6 +66,9 @@ type SwapMarks struct {
 	Shadow bool
 	// ShadowExists: a table has the name of the shadow table, binwave's or not.
 	ShadowExists bool
+	// Swapped: the table is the shadow table, by its UUID: the exchange was made, and with no marker on the
+	// table the swap was finished.
+	Swapped bool
 }
 
 // SwapMarks reads which of the table and its shadow table carries the marker of the resync. Like the
@@ -78,7 +84,10 @@ func (c *Client) SwapMarks(ctx context.Context, req SwapRequest) (SwapMarks, err
 	}
 	marker := ResyncMarker(req.Table)
 	t, s := got[req.Table], got[req.Shadow]
-	return SwapMarks{Table: t.exists && isMarker(t.comment, marker), Shadow: ownMarker(s, marker), ShadowExists: s.exists}, nil
+	return SwapMarks{
+		Table: t.exists && isMarker(t.comment, marker), Shadow: isCopy(s, marker, req.ShadowUUID), ShadowExists: s.exists,
+		Swapped: req.ShadowUUID != "" && t.exists && t.uuid == req.ShadowUUID,
+	}, nil
 }
 
 // DropShadow drops the shadow table of a resync if it is binwave's, by its identity, and what drops a
@@ -86,7 +95,7 @@ func (c *Client) SwapMarks(ctx context.Context, req SwapRequest) (SwapMarks, err
 // binwave's to drop.
 func (c *Client) DropShadow(ctx context.Context, req SwapRequest) (dropped bool, err error) {
 	return dropCopy(ctx, clientOps{c}, c.log, swapSpec{
-		database: req.Database, table: req.Table, copy: req.Shadow, marker: ResyncMarker(req.Table),
+		database: req.Database, table: req.Table, copy: req.Shadow, marker: ResyncMarker(req.Table), copyUUID: req.ShadowUUID,
 	})
 }
 
