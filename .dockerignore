@@ -4,3 +4,4 @@
 !Makefile
 !cmd/
 !internal/
+!deploy/docker/docker-entrypoint.sh
