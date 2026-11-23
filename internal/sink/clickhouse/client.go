@@ -117,6 +117,8 @@ func (c *Client) Close() error {
 type DDL struct {
 	Mode   config.DDLMode
 	DryRun bool
+	// Existing: the table is not created; one that is not there is a *TableError.
+	Existing bool
 }
 
 // SchemaMismatchError reports an existing ClickHouse table that does not match the source table.
@@ -138,6 +140,9 @@ func (c *Client) Ensure(ctx context.Context, t *Table, ddl DDL) error {
 	actual, err := c.columns(ctx, t.Database, t.Name)
 	if err != nil {
 		return err
+	}
+	if len(actual) == 0 && ddl.Existing {
+		return &TableError{Table: t.Source.FullName(), Recoverable: true, Err: fmt.Errorf("the table %s is gone", t.FullName())}
 	}
 	if len(actual) == 0 {
 		createDB, createTable := "CREATE DATABASE IF NOT EXISTS "+quote(t.Database), t.CreateStatement()
@@ -163,6 +168,17 @@ func (c *Client) Ensure(ctx context.Context, t *Table, ddl DDL) error {
 		}
 	} else if err := c.notAnotherJobs(ctx, t); err != nil {
 		return err
+	}
+	if _, job := parseMarker(t.Comment); job {
+		// A table binwave keeps for a job is written to only while it is the one binwave made: its marker.
+		got, err := clientOps{c}.read(ctx, t.Database, t.Name)
+		if err != nil {
+			return err
+		}
+		if !ownMarker(got[t.Name], t.Comment) {
+			return &ConflictError{Err: fmt.Errorf("ClickHouse has the table %s, which is not the one binwave made for the resync of %s "+
+				"(the marker %q); nothing is written to it, rename or drop it in ClickHouse and resume", t.FullName(), t.Source.FullName(), t.Comment)}
+		}
 	}
 	if err := c.verify(ctx, t); err != nil {
 		return err
@@ -215,7 +231,7 @@ func (c *Client) recordTypes(ctx context.Context, t *Table) error {
 // crash interrupted before it removed the marker: the table is the one it replaced, and the replayed
 // job finishes the swap.
 func (c *Client) notAnotherJobs(ctx context.Context, t *Table) error {
-	comment, _, err := c.tableComment(ctx, t.Database, t.Name)
+	comment, err := c.tableComment(ctx, t.Database, t.Name)
 	if err != nil {
 		return err
 	}
@@ -409,7 +425,12 @@ var transientCodes = map[int32]bool{
 	394: true, // QUERY_WAS_CANCELLED: a server shutting down cancels the queries in flight
 	425: true, // SYSTEM_ERROR
 	999: true, // KEEPER_EXCEPTION
+
+	codeQueryWithSameIDRunning: true, // an exchange sent before still runs (ExchangeQueryID)
 }
+
+// codeQueryWithSameIDRunning is QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING.
+const codeQueryWithSameIDRunning = 216
 
 // IsTransient reports whether an error from ClickHouse is worth retrying: network trouble and
 // overload clear up, while a missing table, a type mismatch or a rejected login fail the same
@@ -425,7 +446,7 @@ func IsTransient(err error) bool {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return false
-	case errors.Is(err, context.DeadlineExceeded),
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, errExchangeRunning),
 		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
 		errors.Is(err, ch.ErrAcquireConnTimeout),
 		errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE), errors.Is(err, syscall.ECONNREFUSED):

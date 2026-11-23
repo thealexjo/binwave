@@ -164,6 +164,64 @@ func TestEnsureNeverTakesATableBinwaveKeepsForAnotherJob(t *testing.T) {
 	}
 }
 
+// TestEnsureTakesATableOfAJobOnlyWhenItIsTheOneBinwaveMade: a table of the same structure under the name
+// of a shadow table, without the marker, or with a marker that names another copy, is not taken for the
+// shadow table, whether the job begins or the stream is bound to it: a conflict, and the table is left as
+// it was.
+func TestEnsureTakesATableOfAJobOnlyWhenItIsTheOneBinwaveMade(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	sink := openSink(t, ch)
+	ctx := context.Background()
+	src := kvTable()
+	src.Name = "kv__resync"
+	byHand := resolveTable(t, src, nil)
+	if err := sink.Ensure(ctx, byHand, additive); err != nil {
+		t.Fatal(err)
+	}
+	insertKV(t, sink, byHand, kvRows(event.Insert, nil, []any{int32(1), "by hand"}), 10)
+	uuid := tableUUID(t, ch, "replica", "kv__resync")
+	comment := func() string {
+		var c string
+		if err := ch.DB.QueryRow("SELECT comment FROM system.tables WHERE database = 'replica' AND name = 'kv__resync'").Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	shadow := resolveTable(t, kvTable(), nil)
+	shadow.Name, shadow.Comment = "kv__resync", chsink.ResyncMarker("kv")
+	marker := chsink.ResyncMarker("kv")
+	for _, c := range []struct {
+		name, comment string
+		taken         bool
+	}{
+		{"no marker", "", false},
+		{"a marker naming another copy", chsink.Replacing(marker, "0a000000-0000-0000-0000-00000000000a", "0c000000-0000-0000-0000-00000000000c"), false},
+		{"a marker naming the table", chsink.Replacing(marker, "0a000000-0000-0000-0000-00000000000a", uuid), true},
+		{"the marker", marker, true},
+	} {
+		execCH(t, ch, "ALTER TABLE replica.kv__resync MODIFY COMMENT '"+c.comment+"'")
+		for _, ddl := range []chsink.DDL{additive, {Mode: additive.Mode, Existing: true}} {
+			err := sink.Ensure(ctx, shadow, ddl)
+			if c.taken {
+				if err != nil {
+					t.Errorf("%s, existing %v: Ensure() = %v, want the shadow table taken", c.name, ddl.Existing, err)
+				}
+				continue
+			}
+			if !chsink.IsConflict(err) {
+				t.Errorf("%s, existing %v: Ensure() = %v, want a conflict", c.name, ddl.Existing, err)
+			}
+			if got := comment(); got != c.comment {
+				t.Errorf("%s, existing %v: the comment is %q, want it left as it was", c.name, ddl.Existing, got)
+			}
+		}
+	}
+	if rows := readTable(t, ch, "kv__resync", "k"); len(rows) != 1 || rows[0]["v"] != "by hand" {
+		t.Errorf("the table changed: %v", rows)
+	}
+}
+
 func TestEnsureReportsAMismatchAndLeavesTheTableAlone(t *testing.T) {
 	t.Parallel()
 	ch := testenv.StartClickHouse(t)

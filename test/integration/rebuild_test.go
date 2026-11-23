@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	chgo "github.com/ClickHouse/clickhouse-go/v2"
+
 	"github.com/thealexjo/binwave/internal/config"
 	"github.com/thealexjo/binwave/internal/event"
 	"github.com/thealexjo/binwave/internal/schema"
@@ -269,9 +271,10 @@ func TestRebuildCanBeRepeatedAtEveryStep(t *testing.T) {
 	if err := client.Rebuild(ctx, req); err != nil {
 		t.Fatalf("the second rebuild: %v", err)
 	}
-	// And with the swap done but the old table not yet dropped: the copy, now t, has the marker.
+	// And with the swap done but the old table not yet dropped: the copy, now t, has the marker, which
+	// names the old table.
 	binwaveShaped(t, ch, "t__rebuild", "id", "(9, 'old', 1, 0, now())")
-	markRebuild(t, ch, "t", chsink.RebuildMarker("t"))
+	markRebuild(t, ch, "t", chsink.Replacing(chsink.RebuildMarker("t"), tableUUID(t, ch, "replica", "t__rebuild"), tableUUID(t, ch, "replica", "t")))
 	if err := client.Rebuild(ctx, req); err != nil {
 		t.Fatalf("the rebuild after a swap that was not cleaned up: %v", err)
 	}
@@ -283,11 +286,51 @@ func TestRebuildCanBeRepeatedAtEveryStep(t *testing.T) {
 	}
 }
 
+// TestARebuildWaitsWhileAnExchangeOfTheTableRuns: an exchange of the table sent before (its answer lost)
+// may still run, and until it is over nothing of the rebuild is read or done: the table it reads could be
+// exchanged under it.
+func TestARebuildWaitsWhileAnExchangeOfTheTableRuns(t *testing.T) {
+	t.Parallel()
+	ch := testenv.StartClickHouse(t)
+	client := openSink(t, ch)
+	ctx := context.Background()
+	binwaveShaped(t, ch, "t", "id", "(1, 'a', 1, 0, now())")
+	req := chsink.RebuildRequest{Source: "s.t", Database: "replica", Table: "t", Key: []string{"code"}}
+
+	id := chsink.ExchangeQueryID("replica", "t")
+	running := make(chan error, 1)
+	go func() {
+		_, err := ch.DB.ExecContext(chgo.Context(ctx, chgo.WithQueryID(id)), "SELECT sleep(3)")
+		running <- err
+	}()
+	waitUntil(t, "the query to run", 10*time.Second, func() bool {
+		var n uint64
+		if err := ch.DB.QueryRow("SELECT count() FROM system.processes WHERE query_id = ?", id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n > 0
+	})
+	if err := client.Rebuild(ctx, req); !chsink.IsTransient(err) {
+		t.Errorf("Rebuild() while an exchange runs = %v, want a transient error", err)
+	}
+	if got := chTables(t, ch); strings.Join(got, ",") != "t" {
+		t.Errorf("tables %v: the rebuild did something while an exchange ran", got)
+	}
+	if err := <-running; err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Rebuild(ctx, req); err != nil || chSortingKey(t, ch, "t") != "code" {
+		t.Errorf("Rebuild() once it ended = %v, sort key %q", err, chSortingKey(t, ch, "t"))
+	}
+}
+
 // TestARestartAfterTheSwapOfARebuildFinishesIt: a crash after EXCHANGE TABLES leaves the rebuilt
 // table in its place with the marker of the copy, and the statement is replayed after the restart. The
 // restart binds the table to the source as it is now before the replay reaches the statement, and it
 // must take the table back, for the replay to finish the rebuild: also a table whose own name ends like
-// a copy, and a table an earlier release marked.
+// a copy, and a table an earlier release marked. The old table under the name of the copy is dropped
+// only when the marker names its UUID: a marker of an earlier release names none, and a table that took
+// the name later is another; both are left.
 func TestARestartAfterTheSwapOfARebuildFinishesIt(t *testing.T) {
 	t.Parallel()
 	ch := testenv.StartClickHouse(t)
@@ -298,13 +341,15 @@ func TestARestartAfterTheSwapOfARebuildFinishesIt(t *testing.T) {
 		name     string
 		table    string
 		marker   string
-		leftover bool // the old table, under the name of the copy, is not dropped yet
+		leftover bool   // a table under the name of the copy
+		replaced string // the UUID the marker names as the replaced table: "leftover" for that table's
 	}{
-		{"after the exchange", "kv", chsink.RebuildMarker("kv"), true},
-		{"after the old table was dropped", "kv", chsink.RebuildMarker("kv"), false},
-		{"after the exchange of a table named like a copy", "kv__rebuild", chsink.RebuildMarker("kv__rebuild"), true},
-		{"after the old table of a table named like a copy was dropped", "kv__rebuild", chsink.RebuildMarker("kv__rebuild"), false},
-		{"after the exchange of an earlier release", "kv", "binwave: rebuild", true},
+		{"after the exchange", "kv", chsink.RebuildMarker("kv"), true, "leftover"},
+		{"after the old table was dropped", "kv", chsink.RebuildMarker("kv"), false, "0a000000-0000-0000-0000-00000000000a"},
+		{"after the exchange of a table named like a copy", "kv__rebuild", chsink.RebuildMarker("kv__rebuild"), true, "leftover"},
+		{"after the old table of a table named like a copy was dropped", "kv__rebuild", chsink.RebuildMarker("kv__rebuild"), false, "0a000000-0000-0000-0000-00000000000a"},
+		{"after the exchange of an earlier release", "kv", "binwave: rebuild", true, ""},
+		{"after the old table was dropped and another took its name", "kv", chsink.RebuildMarker("kv"), true, "0a000000-0000-0000-0000-00000000000a"},
 	} {
 		src := func(key ...int) *schema.Table {
 			return &schema.Table{
@@ -330,10 +375,18 @@ func TestARestartAfterTheSwapOfARebuildFinishesIt(t *testing.T) {
 			t.Fatal(err)
 		}
 		// What the crash left of the rebuild.
-		markRebuild(t, ch, crash.table, crash.marker)
+		marker := crash.marker
 		if crash.leftover {
 			binwaveShaped(t, ch, copied, "id", "(9, 'old', 1, 0, now())")
 		}
+		switch crash.replaced {
+		case "":
+		case "leftover":
+			marker = chsink.Replacing(marker, tableUUID(t, ch, "replica", copied), tableUUID(t, ch, "replica", crash.table))
+		default:
+			marker = chsink.Replacing(marker, crash.replaced, tableUUID(t, ch, "replica", crash.table))
+		}
+		markRebuild(t, ch, crash.table, marker)
 
 		if err := client.Ensure(ctx, resolveTable(t, src(0, 1), nil), additive); err != nil {
 			t.Fatalf("%s: the restart binds the rebuilt table: %v", crash.name, err)
@@ -341,8 +394,12 @@ func TestARestartAfterTheSwapOfARebuildFinishesIt(t *testing.T) {
 		if err := client.Rebuild(ctx, req); err != nil {
 			t.Fatalf("%s: the replayed rebuild: %v", crash.name, err)
 		}
-		if got := chTables(t, ch); strings.Join(got, ",") != crash.table {
-			t.Errorf("%s: tables %v, want only %s", crash.name, got, crash.table)
+		want := crash.table
+		if crash.leftover && crash.replaced != "leftover" {
+			want += "," + copied
+		}
+		if got := chTables(t, ch); strings.Join(got, ",") != want {
+			t.Errorf("%s: tables %v, want %s", crash.name, got, want)
 		}
 		if got := chTableComment(t, ch, crash.table); got != "" {
 			t.Errorf("%s: the comment of %s = %q, want the marker removed", crash.name, crash.table, got)
@@ -350,7 +407,7 @@ func TestARestartAfterTheSwapOfARebuildFinishesIt(t *testing.T) {
 		if got, err := textRows(ch.DB, "SELECT k, code FROM replica."+crash.table+" FINAL ORDER BY k"); err != nil || strings.Join(got, ";") != "1\ta;2\tb" {
 			t.Errorf("%s: rows %v (%v)", crash.name, got, err)
 		}
-		execCH(t, ch, "DROP TABLE replica."+crash.table)
+		execCH(t, ch, "DROP TABLE replica."+crash.table, "DROP TABLE IF EXISTS replica."+copied)
 	}
 }
 

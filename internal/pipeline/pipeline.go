@@ -72,11 +72,13 @@ type Sink interface {
 	// CheckAccess returns an *AccessError for the first privilege the user lacks on the database.
 	CheckAccess(ctx context.Context, database string, privileges ...string) error
 	// SwapShadow puts the shadow table of a resync in the place of the table, and drops the old one.
-	// sent reports that the exchange was sent, whatever its answer.
-	SwapShadow(ctx context.Context, req chsink.SwapRequest) (sent bool, err error)
+	// copied is the UUID of the shadow table an exchange may have been made with, whatever its answer.
+	SwapShadow(ctx context.Context, req chsink.SwapRequest) (copied string, err error)
 	// SwapMarks says which of the table and its shadow table carries the marker of the resync: a crash
 	// may have interrupted the swap after the exchange.
 	SwapMarks(ctx context.Context, req chsink.SwapRequest) (chsink.SwapMarks, error)
+	// DropShadow drops the shadow table of a resync if it is binwave's, by its identity.
+	DropShadow(ctx context.Context, req chsink.SwapRequest) (dropped bool, err error)
 	// TruncateTable empties a table that the source truncated, if it exists.
 	TruncateTable(ctx context.Context, req chsink.TruncateRequest) error
 	Insert(ctx context.Context, t *chsink.Table, rows []chsink.Row) error
@@ -667,15 +669,6 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 	if resyncing && !job.state.Pending { // a pending one has no shadow table until it begins again
 		// The table is being resynchronized: its changes go to the shadow table, which replaces it.
 		t.Name, t.Comment = job.state.Shadow, chsink.ResyncMarker(t.Name)
-		// The shadow table is made when the resync begins (or reads again), never here: one that is gone
-		// would come back empty, and be swapped in without what it had.
-		shape, err := p.shape(ctx, t.Database, t.Name)
-		if err != nil {
-			return nil, err
-		}
-		if !shape.Exists {
-			return nil, &chsink.TableError{Table: name, Recoverable: true, Err: fmt.Errorf("the shadow table %s of the resync is gone", t.FullName())}
-		}
 	}
 	// The target is one database, so tables of the same name in different source databases would
 	// share a ClickHouse table and overwrite each other's rows without any error.
@@ -692,7 +685,9 @@ func (p *Pipeline) bind(ctx context.Context, src *schema.Table) (*binding, error
 			return nil, &chsink.TableError{Table: name, Err: fmt.Errorf("table %s: %w", name, problem)}
 		}
 	}
-	ddl := chsink.DDL{Mode: p.cfg.DDL.Mode, DryRun: p.cfg.DDL.DryRun}
+	// A shadow table is made when its resync begins (or reads again), never here: one that is gone would
+	// come back empty, and be swapped in without what it had.
+	ddl := chsink.DDL{Mode: p.cfg.DDL.Mode, DryRun: p.cfg.DDL.DryRun, Existing: resyncing && !job.state.Pending}
 	if err := p.withRetry(ctx, "prepare table "+t.FullName(), func(actx context.Context) error {
 		return p.d.Sink.Ensure(actx, t, ddl)
 	}); err != nil {

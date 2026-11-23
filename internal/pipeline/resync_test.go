@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"sync"
@@ -1225,6 +1226,47 @@ func TestAShadowTableLostBeforeTheSwapIsNotTakenForASwap(t *testing.T) {
 	}
 }
 
+// TestASwapThatFailedBeforeItsExchangeDoesNotTakeALostShadowTableForASwap: an attempt of the swap fails
+// before an exchange was sent (reading the queries that run failed), and by the next attempt the shadow
+// table is gone. Nothing was exchanged, so the resync is given up, not finished.
+func TestASwapThatFailedBeforeItsExchangeDoesNotTakeALostShadowTableForASwap(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(3)}
+	h.obs = &fakeObserver{}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{
+		uuidTx(1, insertRows(items, 1, "a")), uuidTx(2, insertRows(items, 2, "b")), uuidTx(3, insertRows(items, 3, "c")),
+	}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":1" {
+			asks(p, reply)()
+		}
+	}
+	h.sink.swapFails = &swapFailure{sent: false, err: io.ErrUnexpectedEOF}
+	h.sink.onSwap = func(chsink.SwapRequest) {
+		h.sink.mu.Lock()
+		h.sink.lost = map[string]bool{"shop.items__resync": true}
+		h.sink.mu.Unlock()
+	}
+	h.sink.tables["shop.items"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "old"}}}
+	h.source.until = func() bool { return p.q.isQuarantined("shop.items") && len(p.resyncs) == 0 }
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if err := <-reply; err != nil {
+		t.Fatalf("the resync was refused: %v", err)
+	}
+	if got := h.obs.(*fakeObserver).sequence("resync-finished"); len(got) != 1 || got[0] != "resync-finished shop.items false" {
+		t.Errorf("finished = %v, want the resync reported as given up; %v", got, h.journal.all())
+	}
+	if got, want := live(t, h, "shop.items"), map[string]string{"1|": "a", "9|": "old"}; !equal(got, want) {
+		t.Errorf("rows = %v, want the table as it was: %v", got, want)
+	}
+}
+
 // TestACleanupThatFailsAfterTheExchangeDoesNotGiveTheResyncUp: the exchange was sent, and what follows
 // it fails as a problem of the table. Giving the resync up would drop the old table under the name of
 // the shadow table and leave the marker on the table, where the next resync of it takes the marker for
@@ -1429,6 +1471,96 @@ func TestAShadowTableLostBeforeItsFirstRowIsNotMadeAgain(t *testing.T) {
 	// Row 1 was written before the resync began (it begins at the end of transaction 1).
 	if got, want := live(t, h, "shop.items"), map[string]string{"1|": "a", "9|": "old"}; !equal(got, want) {
 		t.Errorf("rows = %v, want the table as it was: %v", got, want)
+	}
+}
+
+// TestAShadowTableLostWhileItsTableIsBoundIsNotMadeAgain: the shadow table is there when binding the
+// table to the stream begins, and gone by the attempt that follows a failed one. No attempt makes it.
+func TestAShadowTableLostWhileItsTableIsBoundIsNotMadeAgain(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{rows: [][]any{{int64(1), "a"}}, executed: fence(3)}
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{
+		uuidTx(1, insertRows(items, 1, "a")), uuidTx(2, insertRows(items, 2, "b")), uuidTx(3, insertRows(items, 3, "c")),
+	}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":1" {
+			asks(p, reply)()
+		}
+	}
+	failed := false
+	h.sink.beforeEnsure = func(_ *chsink.Table, ddl chsink.DDL) error {
+		if ddl.Existing && !failed {
+			// The attempt fails, and the shadow table is dropped by hand before the next.
+			failed = true
+			delete(h.sink.shapes, "shop.items__resync")
+			delete(h.sink.tables, "shop.items__resync")
+			return io.ErrUnexpectedEOF
+		}
+		return nil
+	}
+	h.sink.tables["shop.items"] = map[string]cell{"9|": {version: 1, values: []any{int64(9), "old"}}}
+	h.source.until = func() bool { return p.q.isQuarantined("shop.items") && len(p.resyncs) == 0 }
+
+	if err := h.runPipeline(t, p); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if err := <-reply; err != nil {
+		t.Fatalf("the resync was refused: %v", err)
+	}
+	if !failed {
+		t.Fatal("the table was never bound to its shadow table")
+	}
+	if n := h.sink.swapped(); n != 0 {
+		t.Errorf("swapped in %d times: %v", n, h.journal.all())
+	}
+	if _, there := h.sink.shapes["shop.items__resync"]; there {
+		t.Errorf("the lost shadow table was made again: %v", h.journal.all())
+	}
+	if got, want := live(t, h, "shop.items"), map[string]string{"1|": "a", "9|": "old"}; !equal(got, want) {
+		t.Errorf("rows = %v, want the table as it was: %v", got, want)
+	}
+}
+
+// TestNothingIsWrittenToATableThatTookTheNameOfTheShadowTable: while a resync runs, a table binwave did
+// not make, of the same structure, takes the name of its shadow table before the table is bound to it.
+// Not one row is written to it: replication stops.
+func TestNothingIsWrittenToATableThatTookTheNameOfTheShadowTable(t *testing.T) {
+	items := itemsTable()
+	h := newHarness(t)
+	h.snapshot = &fakeSnapshot{executed: fence(3)} // nothing of the table read yet: the stream writes first
+	p := h.pipeline(t)
+	reply := make(chan error, 1)
+	h.source.script = []scriptedTx{
+		uuidTx(1, insertRows(items, 1, "a")), uuidTx(2, insertRows(items, 2, "b")), uuidTx(3, insertRows(items, 3, "c")),
+	}
+	h.source.beforeHandle = func(ev event.Event) {
+		if b, ok := ev.(event.Begin); ok && b.GTID == testUUID+":1" {
+			asks(p, reply)()
+		}
+	}
+	bound := false
+	h.sink.beforeEnsure = func(_ *chsink.Table, ddl chsink.DDL) error {
+		if ddl.Existing && !bound {
+			bound = true
+			h.sink.foreign = map[string]bool{"shop.items__resync": true}
+			h.sink.insertErrsByTarget = map[string]error{"shop.items__resync": errors.New("written to the table that took the name")}
+		}
+		return nil
+	}
+
+	err := h.runPipeline(t, p)
+	var failed *FailedError
+	if !errors.As(err, &failed) || !bound {
+		t.Fatalf("Run() = %v (bound %v), want replication failed", err, bound)
+	}
+	if got := h.journal.all(); slices.ContainsFunc(got, func(e string) bool { return strings.Contains(e, "items__resync") && strings.HasPrefix(e, "insert") }) {
+		t.Errorf("written to the table that took the name of the shadow table: %v", got)
+	}
+	if n := h.sink.swapped(); n != 0 || len(h.sink.drops) != 0 {
+		t.Errorf("swaps = %d, drops = %v: the table must not be touched", n, h.sink.drops)
 	}
 }
 

@@ -267,6 +267,8 @@ type fakeSink struct {
 	// marked answers SwapMarks by "database.table": the table, or the shadow table, carries the marker
 	// of its resync. A marked table means the exchange of its swap was made.
 	marked map[string]bool
+	// beforeEnsure, if set, runs first in every Ensure, under the lock; an error is what Ensure returns.
+	beforeEnsure func(t *chsink.Table, ddl chsink.DDL) error
 	// foreign names, by "database.table", tables under the name of a shadow table that binwave did not
 	// make: SwapMarks says a shadow table that exists (shapes) is binwave's unless it is here.
 	foreign map[string]bool
@@ -322,7 +324,7 @@ func newFakeSink(j *journal, f *faults) *fakeSink {
 	return &fakeSink{journal: j, faults: f, tables: map[string]map[string]cell{}, versions: map[uint64]bool{}}
 }
 
-func (s *fakeSink) Ensure(_ context.Context, t *chsink.Table, _ chsink.DDL) error {
+func (s *fakeSink) Ensure(_ context.Context, t *chsink.Table, ddl chsink.DDL) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	call := len(s.ensures) + 1
@@ -330,6 +332,18 @@ func (s *fakeSink) Ensure(_ context.Context, t *chsink.Table, _ chsink.DDL) erro
 	s.journal.add("ensure %s", t.Source.FullName())
 	if err := s.ensureErrs[call]; err != nil {
 		return err
+	}
+	if s.beforeEnsure != nil {
+		if err := s.beforeEnsure(t, ddl); err != nil {
+			return err
+		}
+	}
+	if name := t.Database + "." + t.Name; strings.HasPrefix(t.Comment, "binwave: ") && s.shapes[name].Exists &&
+		s.foreign[name] {
+		return &chsink.ConflictError{Err: errors.New("the table is not the one binwave made")}
+	}
+	if ddl.Existing && !s.shapes[t.Database+"."+t.Name].Exists {
+		return &chsink.TableError{Table: t.Source.FullName(), Recoverable: true, Err: errors.New("the table is gone")}
 	}
 	if strings.HasPrefix(t.Comment, "binwave: resync shadow") {
 		// A shadow table made: there for Shape and SwapMarks, as binwave's.
@@ -411,20 +425,25 @@ func (s *fakeSink) CheckAccess(context.Context, string, ...string) error {
 }
 
 // SwapShadow puts the shadow table in the place of the table, like the real one does.
-func (s *fakeSink) SwapShadow(_ context.Context, req chsink.SwapRequest) (bool, error) {
+// SwapShadow answers the UUID of the copy as "uuid:" and the name of the shadow table.
+func (s *fakeSink) SwapShadow(_ context.Context, req chsink.SwapRequest) (string, error) {
 	if s.onSwap != nil {
 		s.onSwap(req) // to check, at this exact moment, what the pipeline knew before it swapped
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	copied := "uuid:" + req.Database + "." + req.Shadow
 	if f := s.swapFails; f != nil {
 		s.swapFails = nil
 		s.journal.add("swap-failed %s.%s", req.Database, req.Table)
-		return f.sent, f.err
+		if !f.sent {
+			copied = ""
+		}
+		return copied, f.err
 	}
-	if s.lost[req.Database+"."+req.Shadow] && !req.Exchanged {
+	if s.lost[req.Database+"."+req.Shadow] && req.Copy == "" {
 		s.journal.add("swap-lost %s.%s", req.Database, req.Table)
-		return false, &chsink.TableError{Table: req.Source, Recoverable: true, Err: errors.New("the shadow table is gone")}
+		return "", &chsink.TableError{Table: req.Source, Recoverable: true, Err: errors.New("the shadow table is gone")}
 	}
 	s.swaps = append(s.swaps, req)
 	s.journal.add("swap %s.%s", req.Database, req.Table)
@@ -432,12 +451,12 @@ func (s *fakeSink) SwapShadow(_ context.Context, req chsink.SwapRequest) (bool, 
 		// The exchange was made: what is left is the old table under the name of the shadow table.
 		delete(s.tables, req.Database+"."+req.Shadow)
 		delete(s.shapes, req.Database+"."+req.Shadow)
-		return true, nil
+		return copied, nil
 	}
 	s.tables[req.Database+"."+req.Table] = s.tables[req.Database+"."+req.Shadow]
 	delete(s.tables, req.Database+"."+req.Shadow)
 	delete(s.shapes, req.Database+"."+req.Shadow)
-	return true, nil
+	return copied, nil
 }
 
 // SwapMarks reports the tables that marked lists.
@@ -451,6 +470,23 @@ func (s *fakeSink) SwapMarks(_ context.Context, req chsink.SwapRequest) (chsink.
 		Shadow:       s.marked[shadow] || (exists && !s.foreign[shadow]),
 		ShadowExists: exists,
 	}, nil
+}
+
+// DropShadow drops the shadow table if it is binwave's (marked, or made and not foreign), recorded
+// among the drops.
+func (s *fakeSink) DropShadow(_ context.Context, req chsink.SwapRequest) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	shadow := req.Database + "." + req.Shadow
+	if s.foreign[shadow] || (!s.marked[shadow] && !s.shapes[shadow].Exists) {
+		return false, nil
+	}
+	s.drops = append(s.drops, chsink.DropRequest{Source: req.Shadow, Database: req.Database, Table: req.Shadow})
+	s.journal.add("drop %s", shadow)
+	delete(s.shapes, shadow)
+	delete(s.tables, shadow)
+	delete(s.marked, shadow)
+	return true, nil
 }
 
 // TruncateTable records the truncation.

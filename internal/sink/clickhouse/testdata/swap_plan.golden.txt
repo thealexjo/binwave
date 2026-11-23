@@ -1,0 +1,69 @@
+-- a rebuild
+dry run: query not executed
+    query: SELECT count() FROM system.processes WHERE query_id = 'binwave-exchange-db.t'
+    expect: 0, or wait until it is: an exchange of the table sent before still runs
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('t', 't__rebuild')
+    expect: t with uuid 0a000000-0000-0000-0000-000000000000 and comment ''; t__rebuild with uuid {uuid of `db`.`t__rebuild`} and comment 'binwave: rebuild of t'
+dry run: statement not executed
+    statement: ALTER TABLE `db`.`t__rebuild` MODIFY COMMENT 'binwave: rebuild replacing 0a000000-0000-0000-0000-000000000000 with {uuid of `db`.`t__rebuild`} of t'
+dry run: statement not executed
+    statement: EXCHANGE TABLES `db`.`t` AND `db`.`t__rebuild`
+    query_id: binwave-exchange-db.t
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('t', 't__rebuild')
+    expect: t with uuid {uuid of `db`.`t__rebuild`} and comment 'binwave: rebuild replacing 0a000000-0000-0000-0000-000000000000 with {uuid of `db`.`t__rebuild`} of t'; t__rebuild with uuid 0a000000-0000-0000-0000-000000000000 and comment ''
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('t__rebuild', 'binwave_drop_0a000000000000000000000000000000')
+    expect: t__rebuild with uuid 0a000000-0000-0000-0000-000000000000 and comment ''; no table binwave_drop_0a000000000000000000000000000000
+dry run: statement not executed
+    statement: RENAME TABLE `db`.`t__rebuild` TO `db`.`binwave_drop_0a000000000000000000000000000000`
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('binwave_drop_0a000000000000000000000000000000')
+    expect: binwave_drop_0a000000000000000000000000000000 with uuid 0a000000-0000-0000-0000-000000000000 and comment ''
+dry run: statement not executed
+    statement: DROP TABLE IF EXISTS `db`.`binwave_drop_0a000000000000000000000000000000`
+dry run: query not executed
+    query: SELECT name FROM system.tables WHERE database = 'db' AND startsWith(name, 'binwave_drop_')
+    expect: the tables a drop renamed and did not drop: each whose name is binwave_drop_ followed by its own UUID without dashes is read again and dropped, as above
+dry run: statement not executed
+    statement: ALTER TABLE `db`.`t` MODIFY COMMENT ''
+-- a rebuild whose swap a crash interrupted
+dry run: query not executed
+    query: SELECT count() FROM system.processes WHERE query_id = 'binwave-exchange-db.t'
+    expect: 0, or wait until it is: an exchange of the table sent before still runs
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('t', 't__rebuild')
+    expect: t with uuid 0c000000-0000-0000-0000-000000000000 and comment 'binwave: rebuild replacing 0a000000-0000-0000-0000-000000000000 with 0c000000-0000-0000-0000-000000000000 of t'; t__rebuild with uuid 0a000000-0000-0000-0000-000000000000 and comment ''
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('t__rebuild', 'binwave_drop_0a000000000000000000000000000000')
+    expect: t__rebuild with uuid 0a000000-0000-0000-0000-000000000000 and comment ''; no table binwave_drop_0a000000000000000000000000000000
+dry run: statement not executed
+    statement: RENAME TABLE `db`.`t__rebuild` TO `db`.`binwave_drop_0a000000000000000000000000000000`
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('binwave_drop_0a000000000000000000000000000000')
+    expect: binwave_drop_0a000000000000000000000000000000 with uuid 0a000000-0000-0000-0000-000000000000 and comment ''
+dry run: statement not executed
+    statement: DROP TABLE IF EXISTS `db`.`binwave_drop_0a000000000000000000000000000000`
+dry run: query not executed
+    query: SELECT name FROM system.tables WHERE database = 'db' AND startsWith(name, 'binwave_drop_')
+    expect: the tables a drop renamed and did not drop: each whose name is binwave_drop_ followed by its own UUID without dashes is read again and dropped, as above
+dry run: statement not executed
+    statement: ALTER TABLE `db`.`t` MODIFY COMMENT ''
+-- a rebuild whose swap a crash interrupted after the old table was renamed to be dropped
+dry run: query not executed
+    query: SELECT count() FROM system.processes WHERE query_id = 'binwave-exchange-db.t'
+    expect: 0, or wait until it is: an exchange of the table sent before still runs
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('t', 't__rebuild')
+    expect: t with uuid 0c000000-0000-0000-0000-000000000000 and comment 'binwave: rebuild replacing 0a000000-0000-0000-0000-000000000000 with 0c000000-0000-0000-0000-000000000000 of t'; no table t__rebuild
+dry run: query not executed
+    query: SELECT name, comment, toString(uuid) FROM system.tables WHERE database = 'db' AND name IN ('t__rebuild', 'binwave_drop_0a000000000000000000000000000000')
+    expect: no table t__rebuild; binwave_drop_0a000000000000000000000000000000 with uuid 0a000000-0000-0000-0000-000000000000 and comment ''
+dry run: statement not executed
+    statement: DROP TABLE IF EXISTS `db`.`binwave_drop_0a000000000000000000000000000000`
+dry run: query not executed
+    query: SELECT name FROM system.tables WHERE database = 'db' AND startsWith(name, 'binwave_drop_')
+    expect: the tables a drop renamed and did not drop: each whose name is binwave_drop_ followed by its own UUID without dashes is read again and dropped, as above
+dry run: statement not executed
+    statement: ALTER TABLE `db`.`t` MODIFY COMMENT ''
