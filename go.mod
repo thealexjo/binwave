@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.51.0
 	github.com/go-mysql-org/go-mysql v1.16.0
-	github.com/go-sql-driver/mysql v1.10.1
+	github.com/go-sql-driver/mysql v1.10.2
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20260504140133-511dba1dbe17
 	github.com/prometheus/client_golang v1.25.0
 	github.com/shopspring/decimal v1.6.0
