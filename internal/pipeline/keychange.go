@@ -35,7 +35,11 @@ type pkSpec struct {
 //     key, is a rebuild under the key the source now has. A sort key that is only finer than the new
 //     primary key would identify the rows correctly, but binwave expects the sort key to be the
 //     primary key (or the override), and keeping a finer one would need remembering it across
-//     restarts.
+//     restarts;
+//   - a statement that needs nothing about the key, on a table that carries the marker of a rebuild
+//     (its swap was made and not finished: a crash came before its end, and the statement is
+//     replayed), is a rebuild under the key the table has: it finishes the swap and changes nothing
+//     else.
 //
 // What cannot be rebuilt safely is a *TableError (quarantine): a type that could lose values, a
 // key set by tables.overrides that does not cover the new primary key, no key at all.
@@ -142,6 +146,9 @@ func planKey(cfg *config.Config, source ddl.Name, shape chsink.TableShape, req *
 		}
 	}
 	if !rebuild {
+		if shape.Marked {
+			return &chsink.RebuildRequest{Source: req.Source, Database: req.Database, Table: req.Table, Key: shape.Key}, nil
+		}
 		return nil, nil
 	}
 	if !canRebuild {

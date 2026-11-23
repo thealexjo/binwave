@@ -32,6 +32,7 @@ func TestPlanKey(t *testing.T) {
 		key     []string
 		req     chsink.ChangeRequest
 		pk      pkSpec
+		marked  bool     // the table carries the marker of a rebuild, its swap not finished
 		wantKey []string // nil: no rebuild
 		wantErr string
 		// wantRecoverable is checked only when wantErr is set: whether tables.autoresync may fix
@@ -41,6 +42,19 @@ func TestPlanKey(t *testing.T) {
 		leftRename []chsink.ColumnRename
 	}{
 		{name: "the key the table has needs nothing", key: []string{"id"}, pk: pkSpec{set: true, add: []string{"id"}}},
+		{
+			name: "the key the table has, the swap of its rebuild not finished, is a rebuild under it that finishes the swap",
+			key:  []string{"id"}, pk: pkSpec{set: true, add: []string{"id"}}, marked: true, wantKey: []string{"id"},
+		},
+		{
+			name: "a type of a key column the table has, the swap of its rebuild not finished, finishes the swap",
+			key:  []string{"id"}, marked: true, wantKey: []string{"id"},
+			req: chsink.ChangeRequest{Modify: []chsink.ColumnPlan{retype("id", "Int32", typemap.KindInt)}},
+		},
+		{
+			name: "another key, the swap of a rebuild not finished, is a rebuild under it",
+			key:  []string{"id"}, pk: pkSpec{set: true, add: []string{"code"}}, marked: true, wantKey: []string{"code"},
+		},
 		{name: "shorter new key is a rebuild: the sort key is the primary key", key: []string{"id", "code"}, pk: pkSpec{set: true, add: []string{"id"}}, wantKey: []string{"id"}},
 		{name: "same columns in another order are a rebuild", key: []string{"id", "code"}, pk: pkSpec{set: true, add: []string{"code", "id"}}, wantKey: []string{"code", "id"}},
 		{name: "new key the sort key lacks is a rebuild", key: []string{"id"}, pk: pkSpec{set: true, add: []string{"code"}}, wantKey: []string{"code"}},
@@ -103,7 +117,9 @@ func TestPlanKey(t *testing.T) {
 			req := tt.req
 			req.Source, req.Database, req.Table = "shop.items", "shop", "items"
 
-			got, err := planKey(cfg, shopItems, shapeOf(tt.key, cols), &req, tt.pk, unknownKinds, true)
+			shape := shapeOf(tt.key, cols)
+			shape.Marked = tt.marked
+			got, err := planKey(cfg, shopItems, shape, &req, tt.pk, unknownKinds, true)
 
 			if tt.wantErr != "" {
 				var te *chsink.TableError
@@ -205,6 +221,24 @@ func TestKeyThatTheTableAlreadyHasIsNotRebuilt(t *testing.T) {
 	}
 	if len(h.sink.rebuilds) != 0 || len(h.sink.changes) != 0 {
 		t.Errorf("the table was touched: %+v %+v", h.sink.rebuilds, h.sink.changes)
+	}
+}
+
+// TestAStatementReplayedAfterTheSwapOfItsRebuildFinishesTheSwap: a crash came after the exchange of the
+// rebuild a statement made, before the marker was removed, and the statement is replayed. The table has
+// the key it asks for, and carries the marker: the rebuild under that key finishes the swap.
+func TestAStatementReplayedAfterTheSwapOfItsRebuildFinishesTheSwap(t *testing.T) {
+	h := rebuildHarness(t, []string{"name", "id"}, itemColumns)
+	shape := h.sink.shapes["shop.items"]
+	shape.Marked = true
+	h.sink.shapes["shop.items"] = shape
+	h.source.script = []scriptedTx{tx(1, alterEvent("ALTER TABLE items DROP PRIMARY KEY, ADD PRIMARY KEY (name, id)"))}
+
+	if err := h.run(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.sink.rebuilds) != 1 || !reflect.DeepEqual(h.sink.rebuilds[0].Key, []string{"name", "id"}) {
+		t.Errorf("rebuilds %+v, want the rebuild under the key the table has", h.sink.rebuilds)
 	}
 }
 

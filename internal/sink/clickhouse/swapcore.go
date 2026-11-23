@@ -406,15 +406,43 @@ func (o clientOps) dropping(ctx context.Context, database string) ([]string, err
 	return names, nil
 }
 
-// newPlan is a plan of the swap from the tables as they are, logged to log. made is a copy that is to be
-// made first, with the marker of the job, whose UUID the plan shows by its description.
-func newPlan(log *slog.Logger, spec swapSpec, tables map[string]swapTable, made bool) *planOps {
-	plan := &planOps{log: log, tables: tables, shown: map[string]string{}}
-	if made {
-		plan.tables[spec.copy] = swapTable{exists: true, comment: spec.marker, uuid: standInUUID}
-		plan.shown[standInUUID] = "{uuid of " + quote(spec.database) + "." + quote(spec.copy) + "}"
+// copyOps are the swap operations, and the making of the copy a job swaps in.
+type copyOps interface {
+	swapOps
+	// create runs the statement that makes the table with the comment, and returns its UUID.
+	create(ctx context.Context, stmt, database, table, comment string) (uuid string, err error)
+	// planned reports whether a statement was logged instead of executed: what it changes is still to
+	// be done.
+	planned() bool
+}
+
+func (o clientOps) create(ctx context.Context, stmt, database, table, _ string) (string, error) {
+	if err := o.c.exec(ctx, stmt); err != nil {
+		return "", err
 	}
-	return plan
+	got, err := o.read(ctx, database, table)
+	return got[table].uuid, err
+}
+
+func (clientOps) planned() bool { return false }
+
+// newPlan is a plan of the swap from the tables as they are, logged to log.
+func newPlan(log *slog.Logger, tables map[string]swapTable) *planOps {
+	return &planOps{log: log, tables: tables, shown: map[string]string{}}
+}
+
+func (o *planOps) planned() bool { return o.statements > 0 }
+
+func (o *planOps) create(_ context.Context, stmt, database, table, comment string) (string, error) {
+	o.statement(stmt)
+	o.made(database, table, comment)
+	return standInUUID, nil
+}
+
+// made puts in the model a table that is made by the plan, whose UUID it shows by its description.
+func (o *planOps) made(database, table, comment string) {
+	o.tables[table] = swapTable{exists: true, comment: comment, uuid: standInUUID}
+	o.shown[standInUUID] = "{uuid of " + quote(database) + "." + quote(table) + "}"
 }
 
 // standInUUID is the UUID of a table in a plan that is known only once the table is made.
@@ -424,9 +452,10 @@ const standInUUID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 // order, every query the swap would send, each read with what it is to find there. A UUID that is known
 // only when the swap runs (of a copy not made yet) is a stand-in in the model, shown by its description.
 type planOps struct {
-	log    *slog.Logger
-	tables map[string]swapTable
-	shown  map[string]string // a stand-in UUID, and what the plan shows instead of it
+	log        *slog.Logger
+	tables     map[string]swapTable
+	shown      map[string]string // a stand-in UUID, and what the plan shows instead of it
+	statements int               // the statements logged
 }
 
 func (o *planOps) show(s string) string {
@@ -442,6 +471,7 @@ func (o *planOps) check(query, expect string) {
 }
 
 func (o *planOps) statement(stmt string, attrs ...any) {
+	o.statements++
 	o.log.Info("dry run: statement not executed", append([]any{"statement", o.show(stmt)}, attrs...)...)
 }
 

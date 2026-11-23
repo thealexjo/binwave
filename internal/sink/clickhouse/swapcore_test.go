@@ -269,8 +269,9 @@ func TestASwapLosesNothingWhateverHappensAroundIt(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 	runs := 0
 	for _, known := range []bool{false, true} {
-		// The UUID of the copy known to the job or not; and the table put under the name of the copy carrying
-		// the marker of the job, a copy of its comment, which only the UUID tells from the copy.
+		// The UUID of the copy known (the copy a rebuild made or reused) or not (a resync); and the table put
+		// under the name of the copy carrying the marker of the job, a copy of its comment, which only the
+		// UUID tells from the copy.
 		for _, marked := range []bool{false, true} {
 			if marked && !known {
 				continue
@@ -497,6 +498,40 @@ func TestNothingWithoutAUUIDIsDropped(t *testing.T) {
 	}
 }
 
+// TestASwapDoesNotTakeTheEndOfAnEarlierSwapForItsOwn: the table carries the marker of an earlier swap, its
+// end not done, and a new copy is to be swapped in. The marker is true of the earlier swap, not of this one:
+// with the UUID of the copy known, the swap stops, nothing changed, and does not end as done with the copy
+// still under its name.
+func TestASwapDoesNotTakeTheEndOfAnEarlierSwapForItsOwn(t *testing.T) {
+	const earlier = "0b000000-0000-0000-0000-000000000000"
+	marker := RebuildMarker("t")
+	for _, old := range []map[string]modelTable{
+		{"t": {earlier, Replacing(marker, oldUUID, earlier)}},
+		{"t": {earlier, Replacing(marker, oldUUID, earlier)}, dropName(oldUUID): {oldUUID, ""}},
+	} {
+		m := &swapModel{tables: map[string]modelTable{"t__copy": {copyUUID, marker}}}
+		for n, tb := range old {
+			m.tables[n] = tb
+		}
+		_, outcome, err := swapCopy(context.Background(), m, slog.New(slog.DiscardHandler),
+			swapSpec{database: "db", table: "t", copy: "t__copy", marker: marker, copyUUID: copyUUID})
+		if err != nil || outcome != swapNotTheCopy || m.changes > 0 {
+			t.Errorf("swapCopy() = %d, %v with %d changes, tables %v: want it stopped as not the copy, nothing changed", outcome, err, m.changes, m.tables)
+		}
+
+		// The swap of a rebuild, given the copy it made.
+		m = &swapModel{tables: map[string]modelTable{RebuildName("t"): {copyUUID, marker}, "t": old["t"]}}
+		if u, ok := old[dropName(oldUUID)]; ok {
+			m.tables[dropName(oldUUID)] = u
+		}
+		c := &Client{log: slog.New(slog.DiscardHandler)}
+		err = c.swapRebuilt(context.Background(), RebuildRequest{Source: "s.t", Database: "db", Table: "t"}, m, c.log, copyUUID)
+		if !IsConflict(err) || m.changes > 0 {
+			t.Errorf("swapRebuilt() = %v with %d changes, tables %v: want a conflict, nothing changed", err, m.changes, m.tables)
+		}
+	}
+}
+
 func hasUUID(tables map[string]modelTable, uuid string) bool {
 	for _, t := range tables {
 		if t.uuid == uuid {
@@ -527,7 +562,10 @@ func TestADryRunLogsTheSwapItself(t *testing.T) {
 		}, false},
 	} {
 		var lines []string
-		plan := newPlan(slog.New(recorder{&lines}), spec, c.tables, c.made)
+		plan := newPlan(slog.New(recorder{&lines}), c.tables)
+		if c.made {
+			plan.made(spec.database, spec.copy, spec.marker)
+		}
 		if _, _, err := swapCopy(context.Background(), plan, slog.New(slog.DiscardHandler), spec); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}

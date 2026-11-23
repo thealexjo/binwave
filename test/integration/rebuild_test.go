@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -408,6 +409,100 @@ func TestARestartAfterTheSwapOfARebuildFinishesIt(t *testing.T) {
 			t.Errorf("%s: rows %v (%v)", crash.name, got, err)
 		}
 		execCH(t, ch, "DROP TABLE replica."+crash.table, "DROP TABLE IF EXISTS replica."+copied)
+	}
+}
+
+// TestAStatementReplayedAfterTheSwapOfItsRebuildFinishesIt: a crash came after the exchange of the rebuild
+// a change of the primary key made, before the old table was dropped or after, and before the marker was
+// removed and the position saved. The statement is replayed from the binary log, and the table has the key
+// it asks for. With ddl.dry_run the end of the swap is only planned: replication stops at the statement,
+// nothing changed, and the position stays before it. Without, the replay finishes the swap, and a later
+// change of the key rebuilds the table under it.
+func TestAStatementReplayedAfterTheSwapOfItsRebuildFinishesIt(t *testing.T) {
+	t.Parallel()
+	for _, crash := range []struct {
+		name    string
+		oldLeft bool // the old table is still under the name of the copy
+	}{
+		{"before the old table was dropped", true},
+		{"after the old table was dropped", false},
+	} {
+		t.Run(crash.name, func(t *testing.T) {
+			t.Parallel()
+			my := testenv.StartMySQL(t)
+			ch := testenv.StartClickHouse(t)
+			mustExec(t, my, "CREATE TABLE binwave.k (id INT PRIMARY KEY, code VARCHAR(10) NOT NULL, UNIQUE KEY (code))")
+			cfg := engineConfig(t, my, ch, "file")
+			cfg.DDL.Mode = config.DDLFull
+			rows := pair{"rows", "SELECT id, code FROM binwave.k ORDER BY id", "SELECT id, code FROM replica.k FINAL ORDER BY id"}
+
+			first := startHubEngine(t, cfg)
+			mustExec(t, my, "INSERT INTO binwave.k VALUES (1, 'a'), (2, 'b')")
+			waitSame(t, my, ch, rows)
+			if err := first.stop(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(cfg.Checkpoint.FilePath) // the position before the statement
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			second := startHubEngine(t, cfg)
+			mustExec(t, my, "ALTER TABLE binwave.k DROP PRIMARY KEY, ADD PRIMARY KEY (code)")
+			waitUntil(t, "the rebuild", 60*time.Second, func() bool { return chSortingKey(t, ch, "k") == "code" && chTableComment(t, ch, "k") == "" })
+			if err := second.stop(); err != nil {
+				t.Fatal(err)
+			}
+			// What the crash left: the marker on the table, which names the old table, and the position from
+			// before the statement.
+			replaced, left := "0a000000-0000-0000-0000-00000000000a", "k"
+			if crash.oldLeft {
+				binwaveShaped(t, ch, "k__rebuild", "id", "(1, 'a', 1, 0, now())")
+				replaced, left = tableUUID(t, ch, "replica", "k__rebuild"), "k,k__rebuild"
+			}
+			marker := chsink.Replacing(chsink.RebuildMarker("k"), replaced, chTableUUID(t, ch))
+			markRebuild(t, ch, "k", marker)
+			if err := os.WriteFile(cfg.Checkpoint.FilePath, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pos := loadPosition(t, ch, cfg).GTIDSet
+
+			cfg.DDL.DryRun = true
+			dry := startHubEngine(t, cfg)
+			if f := waitFailedHub(t, dry); !strings.Contains(f.Message, "ddl.dry_run") || !strings.Contains(f.Message, "the statements are in the log") {
+				t.Errorf("the failure does not name the dry run: %s", f.Message)
+			}
+			if err := dry.stop(); err != nil {
+				t.Fatal(err)
+			}
+			if got := chTables(t, ch); strings.Join(got, ",") != left || chTableComment(t, ch, "k") != marker {
+				t.Errorf("the dry run left tables %v, the comment of k %q: want %s, the marker kept", got, chTableComment(t, ch, "k"), left)
+			}
+			if got := loadPosition(t, ch, cfg).GTIDSet; got != pos {
+				t.Errorf("the dry run saved the position %s, want %s, before the statement", got, pos)
+			}
+
+			cfg.DDL.DryRun = false
+			e := startHubEngine(t, cfg)
+			mustExec(t, my, "INSERT INTO binwave.k VALUES (3, 'c')")
+			waitSame(t, my, ch, rows) // the statement, replayed before the row
+			if got := chTables(t, ch); strings.Join(got, ",") != "k" || chTableComment(t, ch, "k") != "" {
+				t.Errorf("the replay left tables %v, the comment of k %q: want only k, the marker removed", got, chTableComment(t, ch, "k"))
+			}
+
+			mustExec(t, my, "ALTER TABLE binwave.k DROP PRIMARY KEY, ADD PRIMARY KEY (id)", "INSERT INTO binwave.k VALUES (4, 'd')")
+			waitSame(t, my, ch, rows)
+			if key := chSortingKey(t, ch, "k"); key != "id" {
+				t.Errorf("sort key %q after the second change of the primary key, want id", key)
+			}
+			if got := chTables(t, ch); strings.Join(got, ",") != "k" || chTableComment(t, ch, "k") != "" {
+				t.Errorf("tables %v, the comment of k %q: want only k, unmarked", got, chTableComment(t, ch, "k"))
+			}
+			e.stillRunning(t)
+			if got := e.quarantinedTables(); len(got) != 0 {
+				t.Errorf("quarantined %v", got)
+			}
+		})
 	}
 }
 

@@ -18,7 +18,7 @@ const rebuildSuffix = "__rebuild"
 func RebuildName(table string) string { return table + rebuildSuffix }
 
 // TableShape is what the pipeline needs to know about a ClickHouse table to decide whether a change
-// of the source touches its sort key.
+// of the source touches its sort key, or finishes the swap of a rebuild.
 type TableShape struct {
 	// Exists is false for a table that has not been created yet (nothing was written to it).
 	Exists bool
@@ -29,9 +29,12 @@ type TableShape struct {
 	// Kinds are the source types binwave recorded in the comments of the columns; a column of a
 	// table made before the comments, or by hand, has none.
 	Kinds map[string]typemap.Column
+	// Marked: the table carries the marker of a rebuild of itself, the swap of which was made and not
+	// finished.
+	Marked bool
 }
 
-// Shape reads the sort key and the columns of a table.
+// Shape reads the sort key, the columns and the marker of a table.
 func (c *Client) Shape(ctx context.Context, database, table string) (TableShape, error) {
 	defs, err := c.columnDefs(ctx, database, table)
 	if err != nil {
@@ -44,7 +47,14 @@ func (c *Client) Shape(ctx context.Context, database, table string) (TableShape,
 	if err != nil {
 		return TableShape{}, err
 	}
-	shape := TableShape{Exists: true, Key: splitKey(key), Columns: map[string]string{}, Kinds: map[string]typemap.Column{}}
+	comment, err := c.tableComment(ctx, database, table)
+	if err != nil {
+		return TableShape{}, err
+	}
+	shape := TableShape{
+		Exists: true, Key: splitKey(key), Columns: map[string]string{}, Kinds: map[string]typemap.Column{},
+		Marked: isMarker(comment, RebuildMarker(table)),
+	}
 	for _, d := range defs {
 		shape.Columns[d.name] = d.typ
 		if kind, ok := typemap.DecodeTypeComment(d.comment); ok {
@@ -93,12 +103,13 @@ type RebuildRequest struct {
 //
 // The caller stops the stream around it, so nothing is written to the original meanwhile. Every
 // step can be repeated after a crash: a table __rebuild with the right key is reused and filled
-// again (equal versions collapse), and a table that already has the new key is done.
+// again (equal versions collapse), the swap of a rebuild whose marker the table carries is finished
+// first, of whatever key it was, and a table that then has the new key is done.
 //
 // It refuses what it cannot rebuild for certain: a table that is not the shape binwave creates (a
 // partition, a TTL, a computed column, another engine) is a *TableError, and a leftover
 // __rebuild table of another key, or a copy that lost rows, is a *ConflictError.
-func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
+func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) (err error) {
 	table := quote(req.Database) + "." + quote(req.Table)
 	tmpName := RebuildName(req.Table)
 	tmp := quote(req.Database) + "." + quote(tmpName)
@@ -124,18 +135,33 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 	}
 	current := splitKey(sortingKey)
 
-	// Done already (a replay after a crash)? The table has the marker when the swap was made and the
-	// old table, under the other name, is still to be dropped.
+	ops, log, err := c.rebuildOps(ctx, req)
+	if err != nil {
+		return err
+	}
+	// A dry run ends as done only when its plan has no statement: one it logged instead of executing is
+	// still to be done, and the statement of the source is not passed until it is.
+	defer func() {
+		if err == nil && ops.planned() {
+			err = &TableError{Table: req.Source, Missing: true, Err: fmt.Errorf(
+				"clickhouse table %s carries the swap of a rebuild that a crash interrupted, which is to be finished, and ddl.dry_run is set, so binwave did not do it (the statements are in the log); "+
+					"ddl.on_missing_structure: quarantine would set the table aside and go on, at the price of the changes made meanwhile", table)}
+		}
+	}()
+	// The marker of a rebuild on the table says the swap of one was made and not finished (a crash came
+	// before its end): it is finished first, whatever rebuild it was of, and the table is decided as it
+	// is then. Finishing it changes neither the columns nor the key.
+	got, err := ops.read(ctx, req.Database, req.Table)
+	if err != nil {
+		return err
+	}
+	if isMarker(got[req.Table].comment, RebuildMarker(req.Table)) {
+		if err := c.swapRebuilt(ctx, req, ops, log, ""); err != nil {
+			return err
+		}
+	}
 	if c.rebuilt(defs, current, req) {
-		comment, err := c.tableComment(ctx, req.Database, req.Table)
-		if err != nil || !isMarker(comment, RebuildMarker(req.Table)) {
-			return err
-		}
-		ops, log, err := c.rebuildOps(ctx, req, false)
-		if err != nil {
-			return err
-		}
-		return c.swapRebuilt(ctx, req, ops, log)
+		return nil // done already (a replay after a crash)
 	}
 
 	// Only a table of the shape binwave creates is rebuilt by binwave.
@@ -229,40 +255,34 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 
 	// A leftover of an earlier attempt is reused when it has the marker and the key we want, and never
 	// touched otherwise: a table of that name without the marker is not binwave's copy. A dry run decides
-	// the same, and logs the statements instead of executing them.
-	have, err := c.Shape(ctx, req.Database, tmpName)
-	switch {
-	case err != nil:
+	// the same, from the tables as the plan leaves them, and logs the statements instead of executing them.
+	got, err = ops.read(ctx, req.Database, tmpName)
+	if err != nil {
 		return err
-	case have.Exists:
-		got, err := clientOps{c}.read(ctx, req.Database, tmpName)
-		if err != nil {
-			return err
-		}
-		if !ownMarker(got[tmpName], RebuildMarker(req.Table)) {
+	}
+	left := got[tmpName]
+	copyUUID := left.uuid // the copy the swap is to put in place: only a table of its UUID is it
+	if left.exists {
+		if !ownMarker(left, RebuildMarker(req.Table)) {
 			return &ConflictError{Err: fmt.Errorf("ClickHouse has the table %s, which is not a copy made by a rebuild of %s; "+
 				"binwave does not drop or reuse it: rename or drop it in ClickHouse and resume", tmp, table)}
+		}
+		have, err := c.Shape(ctx, req.Database, tmpName)
+		if err != nil {
+			return err
 		}
 		if !sameKey(have.Key, req.Key) {
 			return &ConflictError{Err: fmt.Errorf("ClickHouse has the table %s, left by a rebuild of %s under another sort key (%s); "+
 				"binwave does not drop or reuse it: drop it in ClickHouse and resume", tmp, table, strings.Join(have.Key, ", "))}
 		}
-	case req.DryRun:
-		c.log.Info("dry run: statement not executed", "statement", createStmt)
-	default:
-		if err := c.exec(ctx, createStmt); err != nil {
-			return c.classifyRebuild(req, err)
-		}
+	} else if copyUUID, err = ops.create(ctx, createStmt, req.Database, tmpName, RebuildMarker(req.Table)); err != nil {
+		return c.classifyRebuild(req, err)
 	}
 	if req.DryRun {
 		c.log.Info("dry run: statement not executed", "statement", copyStmt)
 		c.log.Info("dry run: query not executed", "query", countStmt,
 			"expect", "the rows the INSERT wrote, or rows of equal keys collapsed: then nothing is swapped, and the copy stays for inspection")
-		ops, log, err := c.rebuildOps(ctx, req, !have.Exists)
-		if err != nil {
-			return err
-		}
-		if err := c.swapRebuilt(ctx, req, ops, log); err != nil {
+		if err := c.swapRebuilt(ctx, req, ops, log, copyUUID); err != nil {
 			return err
 		}
 		return &TableError{Table: req.Source, Missing: true, Err: fmt.Errorf(
@@ -306,16 +326,16 @@ func (c *Client) Rebuild(ctx context.Context, req RebuildRequest) error {
 			table, strings.Join(req.Key, ", "), live, wrote, tmp)}
 	}
 
-	if err := c.swapRebuilt(ctx, req, clientOps{c}, c.log); err != nil {
+	if err := c.swapRebuilt(ctx, req, ops, log, copyUUID); err != nil {
 		return err
 	}
 	c.log.Info("table rebuilt under the new sort key", "table", table, "sort_key", strings.Join(req.Key, ", "), "rows", live)
 	return nil
 }
 
-// rebuildOps is where the swap of a rebuild runs: in ClickHouse, or with ddl.dry_run on a plan of it from
-// what ClickHouse holds (newPlan). made is a copy the rebuild has not made yet, shown by its description.
-func (c *Client) rebuildOps(ctx context.Context, req RebuildRequest, made bool) (swapOps, *slog.Logger, error) {
+// rebuildOps is where a rebuild makes its copy and runs its swaps: in ClickHouse, or with ddl.dry_run on a
+// plan of it from what ClickHouse holds (newPlan), one model for every step.
+func (c *Client) rebuildOps(ctx context.Context, req RebuildRequest) (copyOps, *slog.Logger, error) {
 	if !req.DryRun {
 		return clientOps{c}, c.log, nil
 	}
@@ -330,18 +350,21 @@ func (c *Client) rebuildOps(ctx context.Context, req RebuildRequest, made bool) 
 	if err != nil {
 		return nil, nil, err
 	}
-	return newPlan(c.log, rebuildSpec(req), tables, made), slog.New(slog.DiscardHandler), nil
+	return newPlan(c.log, tables), slog.New(slog.DiscardHandler), nil
 }
 
 func rebuildSpec(req RebuildRequest) swapSpec {
 	return swapSpec{database: req.Database, table: req.Table, copy: RebuildName(req.Table), marker: RebuildMarker(req.Table)}
 }
 
-// swapRebuilt puts the copy in the place of the table, or finishes a swap that a crash interrupted
-// (swapCopy): the old table is dropped by the UUID the marker names, and the marker removed. ops is
-// ClickHouse or, in a dry run, the plan: what ends the swap is told the same in both.
-func (c *Client) swapRebuilt(ctx context.Context, req RebuildRequest, ops swapOps, log *slog.Logger) error {
-	_, outcome, err := swapCopy(ctx, ops, log, rebuildSpec(req))
+// swapRebuilt puts the copy of the UUID in the place of the table, or finishes a swap that a crash
+// interrupted (swapCopy): the old table is dropped by the UUID the marker names, and the marker removed.
+// copyUUID is empty to finish a swap, of whatever copy the marker on the table names. ops is ClickHouse
+// or, in a dry run, the plan: what ends the swap is told the same in both.
+func (c *Client) swapRebuilt(ctx context.Context, req RebuildRequest, ops swapOps, log *slog.Logger, copyUUID string) error {
+	spec := rebuildSpec(req)
+	spec.copyUUID = copyUUID
+	_, outcome, err := swapCopy(ctx, ops, log, spec)
 	if err != nil {
 		return c.classifyRebuild(req, err)
 	}

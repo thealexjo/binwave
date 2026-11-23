@@ -183,10 +183,12 @@ func TestTheDryRunOfARebuildIsAPlanToFollowByHand(t *testing.T) {
 }
 
 // TestADryRunOfARebuildDecidesAsTheRebuild: on what a crash leaves in ClickHouse, a dry run and the rebuild
-// decide the same. A copy left with the marker and the new key is reused by both (the plan makes none);
+// decide the same. The dry run ends as done only when its plan has no statement, and says that the table is
+// still to be done otherwise, before anything is followed by hand. A copy left with the marker and the new key is reused by both (the plan makes none);
 // a copy without the marker or under another key, and a marker on the table that names another copy,
 // stop both with the same conflict, nothing changed; a swap interrupted after its exchange, also after
-// the old table was renamed to be dropped, is finished by both. Each state is made, and gone through,
+// the old table was renamed to be dropped, is finished by both; a swap of an earlier rebuild under another
+// key interrupted so is finished by both first, and the table then rebuilt. Each state is made, and gone through,
 // once for the dry run and once for the rebuild: the end of a swap drops every table a drop left in the
 // database, the other one's too.
 func TestADryRunOfARebuildDecidesAsTheRebuild(t *testing.T) {
@@ -199,44 +201,57 @@ func TestADryRunOfARebuildDecidesAsTheRebuild(t *testing.T) {
 		name     string
 		setup    func(table string)
 		conflict bool
+		makes    bool // the table is to be rebuilt after what the crash left is settled: a copy is made
 	}{
 		{"a copy left with the marker and the new key", func(table string) {
 			binwaveShaped(t, ch, table, "id", rows)
 			binwaveShaped(t, ch, table+"__rebuild", "code", "(2, 'b', 1, 0, now())")
 			markRebuild(t, ch, table+"__rebuild", chsink.RebuildMarker(table))
-		}, false},
+		}, false, false},
 		{"a copy left with the marker naming the tables, right before the exchange", func(table string) {
 			binwaveShaped(t, ch, table, "id", rows)
 			binwaveShaped(t, ch, table+"__rebuild", "code", "(2, 'b', 1, 0, now())")
 			markRebuild(t, ch, table+"__rebuild", chsink.Replacing(chsink.RebuildMarker(table),
 				tableUUID(t, ch, "replica", table), tableUUID(t, ch, "replica", table+"__rebuild")))
-		}, false},
+		}, false, false},
 		{"a copy left without the marker", func(table string) {
 			binwaveShaped(t, ch, table, "id", rows)
 			binwaveShaped(t, ch, table+"__rebuild", "code", "")
-		}, true},
+		}, true, false},
 		{"a copy left under another key", func(table string) {
 			binwaveShaped(t, ch, table, "id", rows)
 			binwaveShaped(t, ch, table+"__rebuild", "id, code", "")
 			markRebuild(t, ch, table+"__rebuild", chsink.RebuildMarker(table))
-		}, true},
+		}, true, false},
 		{"the table rebuilt, its marker naming another copy", func(table string) {
 			binwaveShaped(t, ch, table, "code", rows)
 			binwaveShaped(t, ch, table+"__rebuild", "id", rows)
 			markRebuild(t, ch, table, chsink.Replacing(chsink.RebuildMarker(table), tableUUID(t, ch, "replica", table+"__rebuild"), "0c000000-0000-0000-0000-00000000000c"))
-		}, true},
+		}, true, false},
 		{"the table rebuilt, its own marker on it", func(table string) {
 			binwaveShaped(t, ch, table, "code", rows)
 			binwaveShaped(t, ch, table+"__rebuild", "id", rows)
 			markRebuild(t, ch, table, chsink.Replacing(chsink.RebuildMarker(table), tableUUID(t, ch, "replica", table+"__rebuild"), tableUUID(t, ch, "replica", table)))
-		}, false},
+		}, false, false},
 		{"the table rebuilt, the old table renamed to be dropped", func(table string) {
 			binwaveShaped(t, ch, table, "code", rows)
 			binwaveShaped(t, ch, table+"__rebuild", "id", rows)
 			old := tableUUID(t, ch, "replica", table+"__rebuild")
 			execCH(t, ch, "RENAME TABLE replica."+table+"__rebuild TO replica.binwave_drop_"+strings.ReplaceAll(old, "-", ""))
 			markRebuild(t, ch, table, chsink.Replacing(chsink.RebuildMarker(table), old, tableUUID(t, ch, "replica", table)))
-		}, false},
+		}, false, false},
+		{"the table rebuilt, the swap finished", func(table string) {
+			binwaveShaped(t, ch, table, "code", rows)
+		}, false, false},
+		{"the table rebuilt under another key, its own marker on it, the old table dropped", func(table string) {
+			binwaveShaped(t, ch, table, "id", rows)
+			markRebuild(t, ch, table, chsink.Replacing(chsink.RebuildMarker(table), "0a000000-0000-0000-0000-00000000000a", tableUUID(t, ch, "replica", table)))
+		}, false, true},
+		{"the table rebuilt under another key, its own marker on it, the old table under the name of the copy", func(table string) {
+			binwaveShaped(t, ch, table, "id", rows)
+			binwaveShaped(t, ch, table+"__rebuild", "code", rows)
+			markRebuild(t, ch, table, chsink.Replacing(chsink.RebuildMarker(table), tableUUID(t, ch, "replica", table+"__rebuild"), tableUUID(t, ch, "replica", table)))
+		}, false, true},
 	} {
 		dropAll := func() {
 			for _, name := range chTables(t, ch) {
@@ -266,19 +281,25 @@ func TestADryRunOfARebuildDecidesAsTheRebuild(t *testing.T) {
 		if changed {
 			t.Errorf("%s: the dry run changed ClickHouse: %q, was %q", c.name, state("tp"), before)
 		}
-		if c.conflict && dryErr == nil || !c.conflict && dryErr != nil && (chsink.IsConflict(dryErr) || !chsink.IsTableProblem(dryErr)) {
-			t.Errorf("%s: the dry run = %v", c.name, dryErr)
+		undone := len(statements(plan)) > 0
+		told := undone && chsink.IsMissingTable(dryErr) || !undone && dryErr == nil // the dry run says what is still to be done
+		if c.conflict && dryErr == nil || !c.conflict && !told {
+			t.Errorf("%s: the dry run = %v with %d statements: want a conflict, or the table still to be done while the plan has statements and done once it has none",
+				c.name, dryErr, len(statements(plan)))
 			continue
 		}
 		var planned string
 		if !c.conflict {
-			if slices.ContainsFunc(statements(plan), func(s string) bool { return strings.HasPrefix(s, "CREATE TABLE") }) {
-				t.Errorf("%s: the plan makes a copy, and one is there: %v", c.name, statements(plan))
+			if makes := slices.ContainsFunc(statements(plan), func(s string) bool { return strings.HasPrefix(s, "CREATE TABLE") }); makes != c.makes {
+				t.Errorf("%s: the plan makes a copy %v, want %v: %v", c.name, makes, c.makes, statements(plan))
 			}
-			followPlan(t, ch, "replica", "tp__rebuild", plan)
+			made := followPlan(t, ch, "replica", "tp__rebuild", plan)
 			planned = state("tp")
-			if got := tableUUID(t, ch, "replica", "tp"); !slices.Contains(want, got) {
-				t.Errorf("%s: the plan followed by hand puts %s in place, want one of %v", c.name, got, want)
+			if got := tableUUID(t, ch, "replica", "tp"); c.makes && got != made || !c.makes && !slices.Contains(want, got) {
+				t.Errorf("%s: the plan followed by hand puts %s in place, want the copy it makes %v, or one of %v", c.name, got, c.makes, want)
+			}
+			if got, err := textRows(ch.DB, "SELECT id, code FROM replica.tp FINAL ORDER BY id"); c.makes && (err != nil || strings.Join(got, ";") != "1\ta;2\tb") {
+				t.Errorf("%s: the plan followed by hand leaves the rows %v (%v)", c.name, got, err)
 			}
 		}
 
@@ -304,8 +325,11 @@ func TestADryRunOfARebuildDecidesAsTheRebuild(t *testing.T) {
 		if planned != state("tr") || planned != "x:code:" {
 			t.Errorf("%s: the plan followed by hand leaves %q, the rebuild %q, want %q", c.name, planned, state("tr"), "x:code:")
 		}
-		if got := tableUUID(t, ch, "replica", "tr"); !slices.Contains(want, got) {
-			t.Errorf("%s: the rebuild puts %s in place, want one of %v", c.name, got, want)
+		if got := tableUUID(t, ch, "replica", "tr"); slices.Contains(want, got) == c.makes {
+			t.Errorf("%s: the rebuild puts %s in place, want a copy it makes %v, or one of %v", c.name, got, c.makes, want)
+		}
+		if got, err := textRows(ch.DB, "SELECT id, code FROM replica.tr FINAL ORDER BY id"); err != nil || strings.Join(got, ";") != "1\ta;2\tb" {
+			t.Errorf("%s: the rebuild leaves the rows %v (%v)", c.name, got, err)
 		}
 	}
 }
